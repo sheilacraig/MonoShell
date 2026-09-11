@@ -203,7 +203,8 @@ export function defaultConfig(): AppConfig {
       prefetchDebounceMs: 400,
       confirmManual: true,
     },
-    ui: { notePrefix: '⃰ ', typeSpeedMs: 18 },
+    // notePrefix 用中点，不要用组合字符（U+20F0 会叠在前一个字符上，显示成乱码）
+    ui: { notePrefix: '· ', typeSpeedMs: 18 },
   };
 }
 
@@ -258,6 +259,25 @@ export function writeDefaultConfig(): string {
     fs.writeFileSync(p, JSON.stringify(defaultConfig(), null, 2), 'utf8');
   }
   return p;
+}
+
+/** 写回配置。落盘前先备份一份 .bak，避免手改/向导改错后无法回退 */
+export function saveConfig(cfg: AppConfig): void {
+  const p = configPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  if (fs.existsSync(p)) {
+    try {
+      fs.copyFileSync(p, p + '.bak');
+    } catch {
+      /* 备份失败不阻塞写入 */
+    }
+  }
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
+  try {
+    fs.chmodSync(p, 0o600);
+  } catch {
+    /* Windows 无 chmod，忽略 */
+  }
 }
 
 export const __dirname = path.dirname(fileURLToPath(import.meta.url));

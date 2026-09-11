@@ -1,9 +1,10 @@
 import os from 'node:os';
 import { loadConfig, type AppConfig, type SshHost } from '../config.js';
-import { addHostInteractive, promptLine, removeHost, type Asker } from './hosts.js';
+import { addHostInteractive, removeHost } from './hosts.js';
+import { promptLine, type Asker } from '../term/prompt.js';
 import { runSetupWizard, setupHint } from './setup.js';
 
-export type { Asker } from './hosts.js';
+export type { Asker } from '../term/prompt.js';
 
 const C = {
   dim: '\x1b[2m',

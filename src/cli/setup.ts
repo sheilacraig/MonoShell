@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { configPath, loadConfig, type AppConfig } from '../config.js';
-import { addHostInteractive, promptLine, saveConfig, type Asker } from './hosts.js';
+import { configPath, loadConfig, saveConfig, type AppConfig } from '../config.js';
+import { addHostInteractive } from './hosts.js';
+import { promptLine, type Asker } from '../term/prompt.js';
 import { chat, makeClient, withTimeout } from '../core/llm.js';
 
 const C = {

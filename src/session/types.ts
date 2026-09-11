@@ -4,10 +4,11 @@ export type SessionKind = 'local' | 'ssh';
 export type ShellType = 'cmd' | 'powershell' | 'unix';
 
 /**
- * 统一的会话抽象。本地 PTY 和 SSH shell 通道对外表现一致，
- * 上层（分类器 / Agent / UI）完全不需要知道自己连的是哪一边。
+ * 会话的描述性信息（没有 IO 能力）。
+ * Agent / systemPrompt 这类「只需要知道自己在哪种环境里」的消费者收这个，
+ * 不必硬塞一个全是 noop 的完整 Session。
  */
-export interface Session {
+export interface SessionContext {
   readonly kind: SessionKind;
   /** 展示用的标识，例如 local:pwsh 或 ssh:prod */
   readonly label: string;
@@ -20,6 +21,13 @@ export interface Session {
    * Windows 控制台下 \n 会被 PowerShell 当成续行（出现 >> 提示符），必须发 \r。
    */
   readonly eol: string;
+}
+
+/**
+ * 统一的会话抽象。本地 PTY 和 SSH shell 通道对外表现一致，
+ * 上层（分类器 / Agent / UI）完全不需要知道自己连的是哪一边。
+ */
+export interface Session extends SessionContext {
   write(data: string): void;
   onData(cb: (data: string) => void): void;
   resize(cols: number, rows: number): void;

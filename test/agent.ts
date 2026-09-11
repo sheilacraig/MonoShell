@@ -291,6 +291,96 @@ async function main(): Promise<void> {
     check('中断后明确告知不再往下试', notes.some((n) => /不再往下试/.test(n)), notes.join(' | '));
   }
 
+  // ── 7b. done:true + 命令（模型按规则 10 交出的 sudo 命令）不能默默收工 ──
+  // 翻车现场：note 打了「需要你手动输入密码」，命令本身却从没出现。
+  {
+    const cfg = defaultConfig();
+    cfg.llm.apiKey = 'sk-test';
+    const notes: string[] = [];
+    let ran = 0;
+    const host = makeHost(cfg, notes, {
+      runCaptured: async () => {
+        ran++;
+        return { output: '', exitCode: 0, timedOut: false };
+      },
+    });
+    const fakeChat = async () =>
+      '{"note":"关闭 ufw 3906 端口（需要你手动输入密码）","command":"sudo ufw deny 3906","done":true}';
+    await new Agent(cfg, host, { chat: fakeChat as never }).run('帮我关闭 ufw 3906 端口');
+
+    check('done:true 带命令时也会把命令打出来（不再静默收工）', notes.some((n) => /sudo ufw deny 3906/.test(n)), notes.join(' | '));
+    check('done:true 的命令不走捕获通道代跑', ran === 0, `ran=${ran}`);
+  }
+
+  // 有交互通道（SSH）时：done:true 的命令应询问后交回用户终端执行
+  {
+    const cfg = defaultConfig();
+    cfg.llm.apiKey = 'sk-test';
+    const notes: string[] = [];
+    let ran = 0;
+    const handed: string[] = [];
+    const host = makeHost(cfg, notes, {
+      needAuth: async () => 'yes',
+      runInteractive: async (c) => {
+        handed.push(c);
+      },
+      runCaptured: async () => {
+        ran++;
+        return { output: '', exitCode: 0, timedOut: false };
+      },
+    });
+    const fakeChat = async () =>
+      '{"note":"关闭 ufw 3906 端口（需要你手动输入密码）","command":"sudo ufw deny 3906","done":true}';
+    await new Agent(cfg, host, { chat: fakeChat as never }).run('帮我关闭 ufw 3906 端口');
+
+    check('done:true 的命令交回用户终端执行', handed.length === 1 && handed[0] === 'sudo ufw deny 3906', handed.join(' | '));
+    check('交回终端时不走捕获通道', ran === 0, `ran=${ran}`);
+    check('交回终端时有明确提示', notes.some((n) => /已交到你的终端执行/.test(n)), notes.join(' | '));
+  }
+
+  // needAuth 选 y 且有交互通道：交回终端，而不是 AI 短超时硬试
+  {
+    const cfg = defaultConfig();
+    cfg.llm.apiKey = 'sk-test';
+    const notes: string[] = [];
+    let ran = 0;
+    const handed: string[] = [];
+    const host = makeHost(cfg, notes, {
+      needAuth: async () => 'yes',
+      runInteractive: async (c) => {
+        handed.push(c);
+      },
+      runCaptured: async () => {
+        ran++;
+        return { output: '', exitCode: 0, timedOut: false };
+      },
+    });
+    const fakeChat = async () => '{"note":"查看 ufw 状态","command":"sudo ufw status verbose","done":false}';
+    await new Agent(cfg, host, { chat: fakeChat as never }).run('看看 ufw 端口');
+
+    check('needAuth 选 y 后交回用户终端执行', handed.length === 1 && handed[0] === 'sudo ufw status verbose', handed.join(' | '));
+    check('有交互通道时 AI 不再短超时硬试', ran === 0, `ran=${ran}`);
+  }
+
+  // 中途卡密码 + 有交互通道：中断后提供交回终端的选择
+  {
+    const cfg = defaultConfig();
+    cfg.llm.apiKey = 'sk-test';
+    const notes: string[] = [];
+    const handed: string[] = [];
+    const host = makeHost(cfg, notes, {
+      needAuth: async () => 'yes',
+      runInteractive: async (c) => {
+        handed.push(c);
+      },
+      runCaptured: async () => ({ output: '', exitCode: -1, timedOut: false, needsInput: true, promptText: 'Password:' }),
+    });
+    const fakeChat = async () => '{"note":"读一下配置","command":"cat /etc/shadow","done":false}';
+    await new Agent(cfg, host, { chat: fakeChat as never }).run('读配置');
+
+    check('卡密码中断后可交回用户终端执行', handed.length === 1 && handed[0] === 'cat /etc/shadow', handed.join(' | '));
+  }
+
   // ── 8. 密码提示嗅探 + 捕获器早退 + 回显残渣擦除 ─────────────────
   {
     check('[sudo] password 提示可嗅出', sniffPasswordPrompt('[sudo] password for wyzd: ') !== null);

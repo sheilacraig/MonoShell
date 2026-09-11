@@ -38,18 +38,25 @@ export function buildWrapped(
 }
 
 /**
- * 回显里标记片段的起始特征 —— 从这里一直到行尾都是我们要删的。
+ * 回显整行的擦除式样。
+ *
  * 不能按整串匹配：PowerShell 有语法高亮，回显的标记中间会被 ANSI 序列打断，
- * 整串匹配必然失败。「起始特征 + 吃到行尾」对有无高亮都成立。
+ * 整串匹配必然失败。所以只锚定「行首 → 标记起点 → 行尾」这条骨架，
+ * 对有无高亮都成立。
  */
 function echoTailPattern(shell: ShellType, m: string): RegExp {
+  // 两个要点：
+  // 1) 从行首开删（`^` + `m` 标志）。回显是独占一行的整条命令，而 MonoShell
+  //    自己已经打印过 `$ cmd` 了，留下半截反而更乱；而且只有整行一起删，
+  //    被折行切开的另一半才不会跟残留内容粘成 `df -h$?"` 这种怪物。
+  // 2) 末尾的 `\r?\n?` 必须吃掉。只删本行内容不删换行，屏幕上会多出一个空行。
   if (shell === 'powershell') {
-    return new RegExp(`;\\s*\\$__m\\s*=[^\\r\\n]*`, 'g');
+    return new RegExp(`^[^\\r\\n]*?;\\s*\\$__m\\s*=[^\\r\\n]*\\r?\\n?`, 'gm');
   }
   if (shell === 'cmd') {
-    return new RegExp(`\\s*&\\s*set\\s+"__m=[^\\r\\n]*`, 'g');
+    return new RegExp(`^[^\\r\\n]*?\\s*&\\s*set\\s+"__m=[^\\r\\n]*\\r?\\n?`, 'gm');
   }
-  return new RegExp(`;\\s*__m="?${m}[^\\r\\n]*`, 'g');
+  return new RegExp(`^[^\\r\\n]*?;\\s*__m="?${m}[^\\r\\n]*\\r?\\n?`, 'gm');
 }
 
 /**
@@ -62,7 +69,23 @@ function echoTailPattern(shell: ShellType, m: string): RegExp {
  * 这里再扫一遍含标记 / `$__m:` 的整行片段，把残渣清掉。
  * 真实命令输出几乎不可能包含 `__AIX_` 或 `$__m:`，误伤概率极低。
  */
-const RESIDUE_RE = /[^\r\n]*(?:__AIX_[a-z0-9]{6}__|\$\{?__m\}?:)[^\r\n]*/g;
+const RESIDUE_RE = /[^\r\n]*(?:__AIX_[a-z0-9]{6}__|\$\{?__m\}?:)[^\r\n]*\r?\n?/g;
+
+/**
+ * 最后一道兜底：回显被折行拦腰截断后剩下的碎片。
+ *
+ * 折断点如果落在 `$__m` 中间（例如 `...echo "$__m:` | `$?"`），残渣里既不含
+ * `__AIX_` 也不含完整的 `$__m:`，上面两条规则都够不着它，屏幕上就会留下
+ * `$?"` 这种看不懂的东西。这类残渣有个共同点：**整行只由标记模板里出现过的
+ * 符号组成**（`$ ? " ; : { } _ m \` 和空白）。正常的命令输出不会长这样，
+ * 所以可以放心按整行清掉。
+ *
+ * 两个细节，错了就会误伤：
+ * - 必须是整行（结尾用 `(?:\r?\n|$)` 收口）。只写「行首若干符号」会把
+ *   `\u@\h:\w$ ...` 这类行开头的反斜杠啃掉一个字符。
+ * - 字符集里不放 `=`，否则 `===` / `---` 这类分隔线会被当成残渣删掉。
+ */
+const ECHO_TAIL_RE = /^[ \t]*[$?";:{}_m\\]+[ \t]*(?:\r?\n|$)/gm;
 
 class Scrubber {
   private pending = '';
@@ -77,7 +100,11 @@ class Scrubber {
   }
 
   private clean(s: string): string {
-    return s.replace(this.echoTail, '').replace(this.markerLine, '').replace(RESIDUE_RE, '');
+    return s
+      .replace(this.echoTail, '')
+      .replace(this.markerLine, '')
+      .replace(RESIDUE_RE, '')
+      .replace(ECHO_TAIL_RE, '');
   }
 
   push(chunk: string): string {
@@ -135,9 +162,14 @@ export function captureExec(
     markerPart.length + 16,
   );
 
+  /** 原始流：只用来判定标记 / 嗅探密码提示，不直接展示 */
   let collected = '';
+  /** 擦除后的流：用户看到的，同时也是回喂给模型的那一份 */
+  let visible = '';
   let done = false;
   let echoSkipped = false;
+  /** skipEcho 时攒回显行的缓冲：TCP 分包可能把回显行切开，没收到换行前不能丢 */
+  let echoBuf = '';
   let timer: NodeJS.Timeout | null = null;
 
   let resolveFn!: (r: ExecResult) => void;
@@ -151,10 +183,13 @@ export function captureExec(
     if (timer) clearTimeout(timer);
     const tail = scrubber.flush();
     if (tail) {
-      collected += tail;
+      // tail 是擦除器里最后一批未吐出的内容，只并入 visible。
+      // （collected 是原始流，早已逐块累积过，这里再加一次会让喂给模型的
+      //  输出尾部重复一遍。）
+      visible += tail;
       opts.emit?.(tail);
     }
-    resolveFn({ output: cleanOutput(collected), exitCode, timedOut, ...extra });
+    resolveFn({ output: cleanOutput(visible), exitCode, timedOut, ...extra });
   };
 
   timer = setTimeout(() => {
@@ -174,11 +209,14 @@ export function captureExec(
 
       // 可选跳过命令回显：回显里的 marker 字面量会被误当成真实输出，
       // 导致命令还没跑完就判定完成。仅在远端确实会回显时开启。
+      // 回显行可能被 TCP 分包切开：没收到行尾换行前攒着，直接丢会吞掉真实输出。
       if (opts.skipEcho && !echoSkipped) {
-        const i = chunk.search(/\r|\n/);
-        if (i < 0) return '';
+        echoBuf += chunk;
+        const m = /\r\n|\r|\n/.exec(echoBuf);
+        if (!m) return '';
         echoSkipped = true;
-        chunk = chunk.slice(i + 1);
+        chunk = echoBuf.slice(m.index + m[0].length);
+        echoBuf = '';
         if (!chunk) return '';
       }
 
@@ -187,6 +225,7 @@ export function captureExec(
       // 先过擦除器再判完成：否则最后一块里的真实输出只进了 collected（喂给模型），
       // 却没进用户可见的流 —— 用户会看不到最后一行。
       const visibleNow = scrubber.push(chunk);
+      visible += visibleNow;
       const markerRe = new RegExp(`${marker}:(\\d*)`);
 
       // 等密码就立刻收手：发出 Ctrl+C 解除远端阻塞，把情况告诉上层

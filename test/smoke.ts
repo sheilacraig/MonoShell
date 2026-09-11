@@ -38,8 +38,10 @@ async function main() {
 
   // 2) 捕获
   let visible = '';
-  const handle = captureExec(session, 'echo CAPTURE_OK', session.shellType, 15000, (s) => {
-    visible += s;
+  const handle = captureExec(session, 'echo CAPTURE_OK', session.shellType, 15000, {
+    emit: (s) => {
+      visible += s;
+    },
   });
   const off = (chunk: string) => {
     visible += handle.feed(chunk);
@@ -66,8 +68,10 @@ async function main() {
       : session.shellType === 'powershell'
         ? 'cmd.exe /c exit 3'
         : '(exit 3)';
-  const h2 = captureExec(session, failCmd, session.shellType, 15000, (s) => {
-    visible += s;
+  const h2 = captureExec(session, failCmd, session.shellType, 15000, {
+    emit: (s) => {
+      visible += s;
+    },
   });
   const off2 = (chunk: string) => {
     h2.feed(chunk);

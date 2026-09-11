@@ -1,5 +1,5 @@
 import type { AppConfig } from '../config.js';
-import type { Session } from '../session/types.js';
+import type { SessionContext } from '../session/types.js';
 import type { ExecResult } from '../term/capture.js';
 import { chat, makeClient, withRetry } from './llm.js';
 import { historyBlock, systemPrompt } from './prompt.js';
@@ -8,7 +8,8 @@ import { checkRisk, detectInteractiveAuth, truncate } from './safety.js';
 export type ConfirmAnswer = 'yes' | 'no' | 'edit';
 
 export interface AgentHost {
-  session: Session;
+  /** 环境描述（kind/label/osFamily/...），只用于拼 systemPrompt，不需要 IO 能力 */
+  session: SessionContext;
   cfg: AppConfig;
   /** 淡色注释行，用来在单窗口里呈现 AI 的思考，不加任何气泡或分栏 */
   note(text: string): void;
@@ -18,6 +19,12 @@ export interface AgentHost {
   /** 询问用户要改成什么命令（确认时选 e） */
   editCommand(command: string): Promise<string | null>;
   runCaptured(command: string, timeoutMs?: number): Promise<ExecResult>;
+  /**
+   * 把命令交回用户自己的终端执行（等同手敲）：SSH 场景下远端是真实 TTY，
+   * 密码提示出来用户自己输。本地内置 shell 等非交互环境不提供此能力，
+   * 走「打印命令请用户手敲」的兜底。
+   */
+  runInteractive?(command: string): Promise<void>;
   /** 用户按了 Ctrl+C */
   isAborted(): boolean;
 }
@@ -53,7 +60,9 @@ function parseDecision(raw: string): Decision | null {
     return {
       note: String(o.note ?? ''),
       command: String(o.command ?? ''),
-      done: Boolean(o.done),
+      // 模型偶尔把 done 写成字符串 "false" —— Boolean("false") 是 true，
+      // 会让 Agent 刚跑一步就提前收工，必须显式比较。
+      done: o.done === true || (o.done as unknown) === 'true',
     };
   } catch {
     return null;
@@ -135,7 +144,14 @@ export class Agent {
 
       if (decision.note) this.host.note(decision.note);
 
-      if (decision.done || !decision.command.trim()) return;
+      if (decision.done || !decision.command.trim()) {
+        // 模型按规则 10 给出「需要手动执行」的命令（典型：sudo 要密码）时，
+        // 不能默默收工——历史上这里只打了一句 note 就 return，
+        // 用户连该敲什么都不知道（实测翻车现场）。命令必须交到用户手上。
+        const c = decision.command.trim();
+        if (decision.done && c) await this.handToTerminal(c);
+        return;
+      }
 
       let cmd = decision.command.trim();
 
@@ -157,7 +173,13 @@ export class Agent {
           }
           cmd = edited;
         } else {
-          // 用户坚持要试：给个短超时，别让他干等 30 秒
+          if (this.host.runInteractive) {
+            // 有交互通道（SSH）：交回用户自己的终端，密码提示出来自己输
+            this.host.note('已交到你的终端执行（密码提示出来自己输）：');
+            await this.host.runInteractive(cmd);
+            return;
+          }
+          // 没有交互通道（本地内置 shell）：给个短超时试一次，别干等 30 秒
           this.host.note('好，试一次，卡住会自动中断。');
           const step = await this.exec(cmd, INTERACTIVE_TIMEOUT_MS);
           if (step.needsInput) {
@@ -199,16 +221,52 @@ export class Agent {
         // 兜底：预判没覆盖到的命令（例如 `sudo -S`）跑到一半卡在密码提示上被嗅探中断。
         // 同样直接收尾，不把轮数浪费在"换一种写法再试"上。
         this.host.note(`命令卡在密码提示上（${step.promptText ?? '等输入'}），已中断，不再往下试。`);
-        this.host.note(`要看这条的结果，请在本会话里手敲：`);
-        this.host.note(`  ${cmd}`);
-        const hint = detectInteractiveAuth(cmd).fix;
-        if (hint) this.host.note(hint);
+        if (this.host.runInteractive) {
+          // 有交互通道就直接问用户要不要交回终端，别只甩一句「请手敲」
+          await this.handToTerminal(cmd);
+        } else {
+          this.host.note(`要看这条的结果，请在本会话里手敲：`);
+          this.host.note(`  ${cmd}`);
+          const hint = detectInteractiveAuth(cmd).fix;
+          if (hint) this.host.note(hint);
+        }
         return;
       }
       steps.push(step);
     }
 
     this.host.note(`已达最大迭代轮数 ${max}（agent.maxRounds 可调），停止。`);
+  }
+
+  /**
+   * 「需要交互输密码」的统一出口：把命令交回用户自己的终端执行，
+   * 密码提示出来用户自己输。没有交互通道（本地内置 shell / 测试）时，
+   * 至少把命令完整打出来，让用户知道该敲什么。
+   */
+  private async handToTerminal(cmd: string): Promise<void> {
+    const need = detectInteractiveAuth(cmd);
+    if (!this.host.runInteractive) {
+      this.host.note('请在本会话里手敲执行：');
+      this.host.note(`  ${cmd}`);
+      if (need.fix) this.host.note(need.fix);
+      return;
+    }
+    const ans = await this.host.needAuth(cmd, need.hint ?? '需要交互式输入', need.fix);
+    if (ans === 'no') {
+      this.host.note('已跳过，未执行。');
+      return;
+    }
+    let finalCmd = cmd;
+    if (ans === 'edit') {
+      const edited = await this.host.editCommand(cmd);
+      if (!edited) {
+        this.host.note('已取消，未执行。');
+        return;
+      }
+      finalCmd = edited;
+    }
+    this.host.note('已交到你的终端执行（密码提示出来自己输）：');
+    await this.host.runInteractive(finalCmd);
   }
 
   private async exec(command: string, timeoutMs?: number): Promise<Step> {

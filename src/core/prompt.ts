@@ -1,6 +1,6 @@
-import type { Session } from '../session/types.js';
+import type { SessionContext } from '../session/types.js';
 
-export function systemPrompt(session: Session, cwd: string): string {
+export function systemPrompt(session: SessionContext, cwd: string): string {
   const osDesc =
     session.kind === 'local'
       ? 'MonoShell 内置类 Unix 环境（Windows/Linux 均通用内置 ls/cat/grep/du/df/sort/find/head/tail 等）'

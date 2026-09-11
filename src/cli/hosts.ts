@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { configPath, defaultConfig, loadConfig, type AppConfig, type SshHost } from '../config.js';
+import { configPath, defaultConfig, loadConfig, saveConfig, type AppConfig, type SshHost } from '../config.js';
+import { promptLine } from '../term/prompt.js';
+
+export type { Asker } from '../term/prompt.js';
 
 const C = {
   dim: '\x1b[2m',
@@ -10,75 +13,6 @@ const C = {
   green: '\x1b[32m',
   yellow: '\x1b[33m',
 };
-
-/** 提问函数：便于向导 / 选择器在测试时注入假输入 */
-export type Asker = (question: string, hidden?: boolean) => Promise<string>;
-
-/** 问一行，hidden=true 时不回显（用于密码） */
-export function promptLine(q: string, hidden = false): Promise<string> {
-  process.stdout.write(q);
-  return new Promise((resolve) => {
-    const stdin = process.stdin;
-    const wasRaw = stdin.isRaw;
-    if (stdin.isTTY) {
-      stdin.setRawMode(true);
-    } else {
-      stdin.setEncoding('utf8');
-    }
-    stdin.resume();
-    let buf = '';
-    const onData = (d: Buffer | string) => {
-      const s = typeof d === 'string' ? d : d.toString('utf8');
-      for (const ch of s) {
-        if (ch === '\r' || ch === '\n') {
-          cleanup();
-          process.stdout.write('\r\n');
-          resolve(buf);
-          return;
-        }
-        if (ch === '\x03') {
-          cleanup();
-          process.stdout.write('^C\r\n');
-          process.exit(130);
-        }
-        if (ch === '\x7f' || ch === '\b') {
-          if (buf.length > 0) {
-            buf = buf.slice(0, -1);
-            if (!hidden) process.stdout.write('\b \b');
-          }
-          continue;
-        }
-        buf += ch;
-        if (!hidden) process.stdout.write(ch);
-      }
-    };
-    const cleanup = () => {
-      stdin.removeListener('data', onData);
-      stdin.pause();
-      if (stdin.isTTY) stdin.setRawMode(Boolean(wasRaw));
-    };
-    stdin.on('data', onData);
-  });
-}
-
-/** 写回配置。落盘前先备份一份 .bak，避免手改/向导改错后无法回退 */
-export function saveConfig(cfg: AppConfig): void {
-  const p = configPath();
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  if (fs.existsSync(p)) {
-    try {
-      fs.copyFileSync(p, p + '.bak');
-    } catch {
-      /* 备份失败不阻塞写入 */
-    }
-  }
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
-  try {
-    fs.chmodSync(p, 0o600);
-  } catch {
-    /* Windows 无 chmod，忽略 */
-  }
-}
 
 function expand(p: string): string {
   return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p;

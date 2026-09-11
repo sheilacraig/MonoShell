@@ -180,6 +180,10 @@ const commands: Record<string, Handler> = {
     if (nArg >= 0 && args[nArg + 1]) {
       n = Number(args[nArg + 1]) || 10;
       files = args.filter((a, i) => !a.startsWith('-') && i !== nArg + 1);
+    } else {
+      // 兼容 `head -5` 这种合并写法（coreutils 支持）
+      const dashN = args.find((a) => /^-\d+$/.test(a));
+      if (dashN) n = Number(dashN.slice(1));
     }
     const src = (
       files.length
@@ -204,6 +208,10 @@ const commands: Record<string, Handler> = {
     if (nArg >= 0 && args[nArg + 1]) {
       n = Number(args[nArg + 1]) || 10;
       files = args.filter((a, i) => !a.startsWith('-') && i !== nArg + 1);
+    } else {
+      // 兼容 `tail -5` 这种合并写法（coreutils 支持）
+      const dashN = args.find((a) => /^-\d+$/.test(a));
+      if (dashN) n = Number(dashN.slice(1));
     }
     const src = (
       files.length
@@ -325,7 +333,10 @@ const commands: Record<string, Handler> = {
     const human = args.some((a) => a.includes('h'));
     const depthArg = args.findIndex((a) => a.startsWith('--max-depth'));
     const maxDepth = depthArg >= 0 ? Number(args[depthArg].split('=')[1] ?? args[depthArg + 1]) || 1 : 1;
-    const target = args.find((a) => !a.startsWith('-')) ?? '.';
+    // 空格分隔形式（--max-depth 2）下，紧跟的数字是深度值，不能当成统计目标。
+    // 否则 `du --max-depth 2 dir` 会去统计一个叫 "2" 的目录，输出为空。
+    const depthValueIdx = depthArg >= 0 && !args[depthArg].includes('=') ? depthArg + 1 : -1;
+    const target = args.find((a, i) => !a.startsWith('-') && i !== depthValueIdx) ?? '.';
     const root = resolve(target, ctx.cwd);
 
     const sizeOf = (p: string): number => {
@@ -424,7 +435,9 @@ const commands: Record<string, Handler> = {
       colIdx = Math.max(0, parseInt(args[kIdx + 1], 10) - 1);
     }
 
-    const files = args.filter((a, i) => !a.startsWith('-') && i !== kIdx + 1);
+    // 只有真的给了 -k 才需要跳过它的值；kIdx=-1 时 kIdx+1===0，
+    // 不过滤的话 `sort file.txt` 会把 args[0] 的文件名误删掉，结果读到空 stdin。
+    const files = args.filter((a, i) => !a.startsWith('-') && (kIdx < 0 || i !== kIdx + 1));
     const src = files.length
       ? files
           .map((f) => {
@@ -504,7 +517,8 @@ const commands: Record<string, Handler> = {
 
   rm: (args, ctx) => {
     const force = args.some((a) => a.startsWith('-') && a.includes('f'));
-    const recursive = args.some((a) => a.startsWith('-') && a.includes('r'));
+    // -r 与 -R 都表示递归（coreutils 语义）；漏掉大写 R 会让 `rm -R dir` 报 EISDIR
+    const recursive = args.some((a) => a.startsWith('-') && (a.includes('r') || a.includes('R')));
     const files = args.filter((a) => !a.startsWith('-'));
     if (!files.length) return { out: 'usage: rm [-rf] <path>', code: force ? 0 : 2 };
     for (const f of files) {

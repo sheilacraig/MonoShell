@@ -126,17 +126,17 @@ export class TerminalUI {
 
   /**
    * 需要用户手动输入密码时的提示。
-   * 与「危险命令确认」刻意分开：这不是风险问题，而是「AI 拿不到终端」的能力边界，
-   * 所以要直接告诉用户该手敲哪条命令，而不是含糊地问一句要不要执行。
+   * 与「危险命令确认」刻意分开：这不是风险问题，而是「AI 的捕获通道拿不到 TTY」
+   * 的能力边界。首选是把命令交回用户自己的终端执行——密码提示出来自己输。
    */
   needAuth(command: string, hint: string, fix?: string): Promise<'yes' | 'no' | 'edit'> {
     return new Promise((resolve) => {
       process.stdout.write(
-        `\r\n${YELLOW}${BOLD}这条命令需要你手动输入密码${RESET} ${DIM}(${hint})${RESET}\r\n` +
+        `\r\n${YELLOW}${BOLD}这条命令需要你在终端里输密码${RESET} ${DIM}(${hint})${RESET}\r\n` +
           `  ${CYAN}${command}${RESET}\r\n` +
-          `  ${DIM}AI 拿不到终端，代不了你输密码。直接在本会话里手敲上面这条即可，密码提示出来时自己输入。${RESET}\r\n` +
+          `  ${DIM}AI 的捕获通道拿不到 TTY，代跑只会卡在密码提示上。交回你的终端执行，密码提示出来自己输即可。${RESET}\r\n` +
           (fix ? `  ${DIM}${fix}${RESET}\r\n` : '') +
-          `  还是要让 AI 试一次? ${BOLD}y${RESET} 试(可能卡住)   ${BOLD}N${RESET} 跳过(默认)   ${BOLD}e${RESET} 改成免密写法   `,
+          `  ${BOLD}y${RESET} 在本终端执行   ${BOLD}N${RESET} 跳过(默认)   ${BOLD}e${RESET} 改成别的命令   `,
       );
 
       this.readKeys(
@@ -171,18 +171,28 @@ export class TerminalUI {
       let buf = initial;
       process.stdout.write(buf);
 
-      this.readKeys(
-        (ch) => {
+      // 不走 readKeys：方向键等功能键是 \x1b[... 多字节序列，
+      // 逐字符处理时第一个 \x1b 就会被误判成「按了 Esc」而取消编辑。
+      // 只有整块数据恰好是一个 \x1b 才算真按了 Esc，其余序列整体剥掉。
+      this.hub.take((data) => {
+        if (data === '\x1b') {
+          this.hub.release();
+          process.stdout.write('\r\n');
+          resolve(null);
+          return;
+        }
+        const cleaned = data.replace(/\x1b(\[[0-9;?]*[a-zA-Z~]|O[A-Za-z])/g, '');
+        for (const ch of cleaned) {
+          if (ch === '\x03') {
+            this.hub.release();
+            process.stdout.write('\r\n');
+            resolve(null);
+            return;
+          }
           if (ch === '\r' || ch === '\n') {
             this.hub.release();
             process.stdout.write('\r\n');
             resolve(buf.trim() || null);
-            return;
-          }
-          if (ch === '\x1b') {
-            this.hub.release();
-            process.stdout.write('\r\n');
-            resolve(null);
             return;
           }
           if (ch === '\x7f' || ch === '\b') {
@@ -190,25 +200,20 @@ export class TerminalUI {
               buf = buf.slice(0, -1);
               process.stdout.write('\b \b');
             }
-            return;
+            continue;
           }
           if (ch === '\x15') {
             // Ctrl+U 清空
             for (let i = 0; i < buf.length; i++) process.stdout.write('\b \b');
             buf = '';
-            return;
+            continue;
           }
           if (ch >= ' ' || ch === '\t') {
             buf += ch;
             process.stdout.write(ch);
           }
-        },
-        () => {
-          this.hub.release();
-          process.stdout.write('\r\n');
-          resolve(null);
-        },
-      );
+        }
+      });
     });
   }
 }

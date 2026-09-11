@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppConfig } from '../config.js';
-import type { Session } from '../session/types.js';
 import { chat, makeClient, withTimeout, type ChatMsg } from './llm.js';
 
 export type Verdict = 'CMD' | 'NL';
