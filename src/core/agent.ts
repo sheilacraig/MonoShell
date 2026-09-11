@@ -1,9 +1,9 @@
 import type { AppConfig } from '../config.js';
 import type { Session } from '../session/types.js';
 import type { ExecResult } from '../term/capture.js';
-import { chat, makeClient } from './llm.js';
+import { chat, makeClient, withRetry } from './llm.js';
 import { historyBlock, systemPrompt } from './prompt.js';
-import { checkRisk, truncate } from './safety.js';
+import { checkRisk, detectInteractiveAuth, truncate } from './safety.js';
 
 export type ConfirmAnswer = 'yes' | 'no' | 'edit';
 
@@ -13,14 +13,26 @@ export interface AgentHost {
   /** 淡色注释行，用来在单窗口里呈现 AI 的思考，不加任何气泡或分栏 */
   note(text: string): void;
   confirm(command: string, reason: string): Promise<ConfirmAnswer>;
+  /** 命令需要用户手动输密码时的提示（与 confirm 分开，语义不同） */
+  needAuth(command: string, hint: string, fix?: string): Promise<ConfirmAnswer>;
   /** 询问用户要改成什么命令（确认时选 e） */
   editCommand(command: string): Promise<string | null>;
-  runCaptured(command: string): Promise<ExecResult>;
+  runCaptured(command: string, timeoutMs?: number): Promise<ExecResult>;
   /** 用户按了 Ctrl+C */
   isAborted(): boolean;
 }
 
-type Step = { command: string; output: string; exitCode: number };
+type Step = {
+  command: string;
+  output: string;
+  exitCode: number;
+  /** 命令卡在等密码上被中断 */
+  needsInput?: boolean;
+  promptText?: string;
+};
+
+/** 用户坚持要试需要密码的命令时，给它一个短超时，避免干等 */
+const INTERACTIVE_TIMEOUT_MS = 8000;
 
 type Decision = {
   note: string;
@@ -50,17 +62,30 @@ function parseDecision(raw: string): Decision | null {
 
 export class Agent {
   private client: ReturnType<typeof makeClient>;
+  private chatFn: typeof chat;
 
   constructor(
     private cfg: AppConfig,
     private host: AgentHost,
+    /** 便于测试注入假的模型调用 */
+    deps: { chat?: typeof chat } = {},
   ) {
     this.client = makeClient(cfg);
+    this.chatFn = deps.chat ?? chat;
   }
 
   async run(goal: string, cwd = process.cwd()): Promise<void> {
     const steps: Step[] = [];
-    const max = Math.max(1, this.cfg.safety.maxRounds);
+    // 迭代轮数（AI 反复「规划→执行→看输出」的次数上限），默认 5，可在 agent.maxRounds 调整
+    const max = Math.max(1, this.cfg.agent.maxRounds);
+
+    // 没有配置 API Key 时不要无限卡住，直接提示用户去配
+    if (!this.cfg.llm.apiKey) {
+      this.host.note('还没有配置大模型 API Key，AI 功能无法工作。');
+      this.host.note('运行 ai setup 跟着提示配一遍，或直接编辑 ~/.ai-shell/config.json 的 llm.apiKey（也可用环境变量 OPENAI_API_KEY / LLM_API_KEY）。');
+      if (goal) this.host.note(`你的输入「${goal.slice(0, 60)}」暂时没法交给 AI 处理。`);
+      return;
+    }
 
     for (let round = 1; round <= max; round++) {
       if (this.host.isAborted()) {
@@ -75,12 +100,30 @@ export class Agent {
 
       let raw: string;
       try {
-        raw = await chat(this.client, this.cfg.llm.chatModel, messages, {
-          temperature: 0.2,
-          maxTokens: 800,
-        });
+        // 超时 + 有限重试都由 agent 段配置控制（agent.timeoutMs / agent.retries）。
+        // 兜住 SDK 在 apiKey/baseURL 错误时的长时间挂起，否则表现就是「一直卡着」。
+        raw = await withRetry(
+          () =>
+            this.chatFn(this.client, this.cfg.llm.chatModel, messages, {
+              temperature: 0.2,
+              maxTokens: 800,
+            }),
+          {
+            retries: this.cfg.agent.retries,
+            timeoutMs: this.cfg.agent.timeoutMs,
+            onRetry: (attempt, err) =>
+              this.host.note(
+                `模型调用失败，重试中（第 ${attempt}/${this.cfg.agent.retries} 次）：${err.message}`,
+              ),
+          },
+        );
       } catch (e) {
-        this.host.note(`调用模型失败：${(e as Error).message}`);
+        const msg = (e as Error).message;
+        this.host.note(
+          /LLM_TIMEOUT/.test(msg)
+            ? `调用模型超时（${Math.round(this.cfg.agent.timeoutMs / 1000)}s，已重试 ${this.cfg.agent.retries} 次），本轮中止。请检查 llm.baseURL / apiKey / 网络。`
+            : `调用模型失败（已重试 ${this.cfg.agent.retries} 次）：${msg}`,
+        );
         return;
       }
 
@@ -94,7 +137,38 @@ export class Agent {
 
       if (decision.done || !decision.command.trim()) return;
 
-      const cmd = decision.command.trim();
+      let cmd = decision.command.trim();
+
+      // 需要交互式密码的命令：AI 拿不到终端，硬跑只会卡到超时，
+      // 而且会让模型接下来连着试各种 sudo 变体、把轮数烧光。所以先问用户。
+      const need = detectInteractiveAuth(cmd);
+      if (need.needs) {
+        // 完整说明（含 hint / fix）由 needAuth 的提示框呈现，这里不再重复打印，避免同一句话出现两遍。
+        const ans = await this.host.needAuth(cmd, need.hint ?? '需要交互式密码', need.fix);
+        if (ans === 'no') {
+          this.host.note('已跳过，未执行。');
+          return;
+        }
+        if (ans === 'edit') {
+          const edited = await this.host.editCommand(cmd);
+          if (!edited) {
+            this.host.note('已取消，未执行。');
+            return;
+          }
+          cmd = edited;
+        } else {
+          // 用户坚持要试：给个短超时，别让他干等 30 秒
+          this.host.note('好，试一次，卡住会自动中断。');
+          const step = await this.exec(cmd, INTERACTIVE_TIMEOUT_MS);
+          if (step.needsInput) {
+            this.host.note(`命令卡在密码提示上（${step.promptText ?? '等输入'}），已中断。请手敲执行。`);
+            return;
+          }
+          steps.push(step);
+          continue;
+        }
+      }
+
       const risk = checkRisk(cmd, this.cfg);
       if (risk.risky) {
         const ans = await this.host.confirm(cmd, risk.reason);
@@ -116,20 +190,30 @@ export class Agent {
               return;
             }
           }
-          steps.push(await this.exec(edited));
-          continue;
+          cmd = edited;
         }
       }
 
-      steps.push(await this.exec(cmd));
+      const step = await this.exec(cmd);
+      if (step.needsInput) {
+        // 兜底：预判没覆盖到的命令（例如 `sudo -S`）跑到一半卡在密码提示上被嗅探中断。
+        // 同样直接收尾，不把轮数浪费在"换一种写法再试"上。
+        this.host.note(`命令卡在密码提示上（${step.promptText ?? '等输入'}），已中断，不再往下试。`);
+        this.host.note(`要看这条的结果，请在本会话里手敲：`);
+        this.host.note(`  ${cmd}`);
+        const hint = detectInteractiveAuth(cmd).fix;
+        if (hint) this.host.note(hint);
+        return;
+      }
+      steps.push(step);
     }
 
-    this.host.note(`已达最大步数 ${max}，停止。`);
+    this.host.note(`已达最大迭代轮数 ${max}（agent.maxRounds 可调），停止。`);
   }
 
-  private async exec(command: string): Promise<Step> {
-    const r = await this.host.runCaptured(command);
+  private async exec(command: string, timeoutMs?: number): Promise<Step> {
+    const r = await this.host.runCaptured(command, timeoutMs);
     if (r.timedOut) this.host.note('命令超时已中断。');
-    return { command, output: r.output, exitCode: r.exitCode };
+    return { command, output: r.output, exitCode: r.exitCode, needsInput: r.needsInput, promptText: r.promptText };
   }
 }

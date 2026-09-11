@@ -11,6 +11,9 @@ const C = {
   yellow: '\x1b[33m',
 };
 
+/** 提问函数：便于向导 / 选择器在测试时注入假输入 */
+export type Asker = (question: string, hidden?: boolean) => Promise<string>;
+
 /** 问一行，hidden=true 时不回显（用于密码） */
 export function promptLine(q: string, hidden = false): Promise<string> {
   process.stdout.write(q);
@@ -39,8 +42,10 @@ export function promptLine(q: string, hidden = false): Promise<string> {
           process.exit(130);
         }
         if (ch === '\x7f' || ch === '\b') {
-          buf = buf.slice(0, -1);
-          if (!hidden) process.stdout.write('\b \b');
+          if (buf.length > 0) {
+            buf = buf.slice(0, -1);
+            if (!hidden) process.stdout.write('\b \b');
+          }
           continue;
         }
         buf += ch;
@@ -56,9 +61,17 @@ export function promptLine(q: string, hidden = false): Promise<string> {
   });
 }
 
-function saveConfig(cfg: AppConfig): void {
+/** 写回配置。落盘前先备份一份 .bak，避免手改/向导改错后无法回退 */
+export function saveConfig(cfg: AppConfig): void {
   const p = configPath();
   fs.mkdirSync(path.dirname(p), { recursive: true });
+  if (fs.existsSync(p)) {
+    try {
+      fs.copyFileSync(p, p + '.bak');
+    } catch {
+      /* 备份失败不阻塞写入 */
+    }
+  }
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
   try {
     fs.chmodSync(p, 0o600);
@@ -71,7 +84,7 @@ function expand(p: string): string {
   return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p;
 }
 
-async function addHost(cfg: AppConfig): Promise<void> {
+export async function addHostInteractive(cfg: AppConfig): Promise<void> {
   const name = (await promptLine('别名 (如 prod-web-01): ')).trim();
   if (!name) {
     console.log('别名不能为空');
@@ -142,10 +155,10 @@ function listHosts(cfg: AppConfig): void {
     const extra = h.comment ? `  ${C.dim}# ${h.comment}${C.reset}` : '';
     console.log(`  ${C.green}${h.name.padEnd(16)}${C.reset} ${h.username}@${h.host}:${h.port ?? 22}  [${auth}]${extra}`);
   }
-  console.log(`${C.dim}连接：ai --ssh <别名>   或   ai ssh use <别名>${C.reset}`);
+  console.log(`${C.dim}连接：直接敲 ai 进入连接选择   |   ai --ssh <别名> 直连   |   ai ssh use <别名>${C.reset}`);
 }
 
-function removeHost(cfg: AppConfig, name: string): void {
+export function removeHost(cfg: AppConfig, name: string): void {
   const before = cfg.ssh.hosts.length;
   cfg.ssh.hosts = cfg.ssh.hosts.filter((h) => h.name !== name);
   if (cfg.ssh.hosts.length === before) {
@@ -165,7 +178,7 @@ export async function handleSshCommand(args: string[]): Promise<void> {
     return;
   }
   if (sub === 'add' || sub === 'new') {
-    await addHost(cfg);
+    await addHostInteractive(cfg);
     return;
   }
   if (sub === 'rm' || sub === 'remove' || sub === 'del') {

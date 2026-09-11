@@ -107,21 +107,22 @@ export class ShellEngine {
     return `\x1b[36m${shown}\x1b[0m \x1b[35m$\x1b[0m `;
   }
 
-  private ctx(stdin: string): CmdCtx {
-    return { cwd: this.cwd, env: this.env, stdin, history: this.history, aliases: this.aliases };
+  private ctx(stdin: string, piped?: boolean): CmdCtx {
+    return { cwd: this.cwd, env: this.env, stdin, history: this.history, aliases: this.aliases, piped };
   }
 
   private async runSegment(
     seg: Segment,
     stdin: string,
     timeoutMs?: number,
+    piped?: boolean,
   ): Promise<{ out: string; code: number; clear?: boolean; exit?: boolean }> {
     const argv = expandGlobs(seg.argv, this.cwd);
     const name = argv[0];
     const args = argv.slice(1);
 
     if (isBuiltin(name)) {
-      const r = (await runBuiltin(name, args, this.ctx(stdin))) as CmdResult;
+      const r = (await runBuiltin(name, args, this.ctx(stdin, piped))) as CmdResult;
       if (r.newCwd) this.cwd = r.newCwd;
       return { out: r.out, code: r.code ?? 0, clear: r.clear, exit: r.exit };
     }
@@ -176,7 +177,7 @@ export class ShellEngine {
       const seg = segments[i];
       const isLast = i === segments.length - 1;
 
-      const r = await this.runSegment(seg, stdin, timeoutMs);
+      const r = await this.runSegment(seg, stdin, timeoutMs, !isLast || Boolean(seg.redirect));
       out = r.out;
       code = r.code;
       if (r.clear) clear = true;

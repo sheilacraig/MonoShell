@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export type Completer = (line: string, cursor: number) => string[];
@@ -7,6 +8,26 @@ export type Completer = (line: string, cursor: number) => string[];
  * 自带的行编辑器：回显、历史、光标、补全全部自己实现。
  * 不再依赖宿主 shell 的 readline，因此不受 PowerShell / bash 各自怪癖影响。
  */
+function strWidth(str: string): number {
+  let w = 0;
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0x3400 && code <= 0x4dbf) ||
+      (code >= 0xff01 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0xac00 && code <= 0xd7af) ||
+      (code >= 0x3000 && code <= 0x303f)
+    ) {
+      w += 2;
+    } else {
+      w += 1;
+    }
+  }
+  return w;
+}
+
 export class LineEditor {
   private buf = '';
   private cursor = 0;
@@ -15,12 +36,15 @@ export class LineEditor {
   private escBuf = '';
   /** 上次 read 未消费完的输入，留给下一行 */
   private pending = '';
+  /** 当前正在等待的那一次 read 的收尾函数，供外部强制结束（如远端连接断开） */
+  private finishCurrent: ((line: string | null) => void) | null = null;
   private stdin = process.stdin;
 
   constructor(
     private promptFn: () => string,
     private history: string[],
     private completer: Completer,
+    private getCwd?: () => string,
   ) {}
 
   private render(): void {
@@ -29,7 +53,7 @@ export class LineEditor {
     const prompt = this.promptFn();
     const plain = stripAnsi(prompt);
     process.stdout.write('\r\x1b[2K' + prompt + this.buf + '\x1b[K');
-    const back = this.buf.length - this.cursor;
+    const back = strWidth(this.buf.slice(this.cursor));
     if (back > 0) process.stdout.write(`\x1b[${back}D`);
     void plain;
   }
@@ -48,6 +72,7 @@ export class LineEditor {
       const finish = (line: string | null) => {
         if (settled) return;
         settled = true;
+        this.finishCurrent = null;
         // 未消费完的字符留给下一次 read，避免吞掉后续命令
         this.pending = this.escBuf;
         this.escBuf = '';
@@ -56,6 +81,7 @@ export class LineEditor {
         this.stdin.pause();
         resolve(line);
       };
+      this.finishCurrent = finish;
       const onEnd = () => finish(null);
 
       const process = () => {
@@ -91,6 +117,17 @@ export class LineEditor {
       // 先把上一次遗留的输入消化掉（管道场景下一行里可能有多条命令）
       process();
     });
+  }
+
+  /**
+   * 外部强制结束当前这一行的读取（返回 null，等同于 Ctrl+D）。
+   * 用于远端连接被关闭时把控制权交回上层，而不是一直干等输入。
+   */
+  interrupt(): void {
+    if (this.finishCurrent) {
+      process.stdout.write('\r\n');
+      this.finishCurrent(null);
+    }
   }
 
   /** 返回 true 表示本次读取结束 */
@@ -237,7 +274,8 @@ export class LineEditor {
       const base = before.slice(0, wordStart);
       let add = candidates[0];
       // 目录补 '/' 结尾
-      const full = path.resolve(process.cwd(), before.slice(wordStart) + add);
+      const cwd = this.getCwd ? this.getCwd() : process.cwd();
+      const full = path.resolve(cwd, add.replace(/^~/, os.homedir()));
       try {
         if (fs.existsSync(full) && fs.statSync(full).isDirectory() && !add.endsWith('/')) add += '/';
       } catch {

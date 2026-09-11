@@ -13,13 +13,33 @@ const BOLD = '\x1b[1m';
  */
 export class InputHub {
   private reader: ((data: string) => void) | null = null;
+  private stdin: NodeJS.ReadStream;
+  private listening = false;
+  private onData = (d: Buffer | string) => {
+    const s = typeof d === 'string' ? d : d.toString('utf8');
+    this.reader?.(s);
+  };
+
+  constructor(stdin: NodeJS.ReadStream = process.stdin) {
+    this.stdin = stdin;
+  }
 
   take(cb: (data: string) => void): void {
     this.reader = cb;
+    if (!this.listening) {
+      this.stdin.on('data', this.onData);
+      this.listening = true;
+    }
+    this.stdin.resume();
   }
 
   release(): void {
     this.reader = null;
+    if (this.listening) {
+      this.stdin.removeListener('data', this.onData);
+      this.listening = false;
+    }
+    this.stdin.pause();
   }
 
   /** 返回 true 表示数据已被 UI 消费，不应再转发给 shell */
@@ -73,11 +93,10 @@ export class TerminalUI {
   /** 高危命令二次确认：y 执行 / N 取消 / e 编辑 */
   confirm(command: string, reason: string): Promise<'yes' | 'no' | 'edit'> {
     return new Promise((resolve) => {
-      this.hub.release();
       process.stdout.write(
         `\r\n${YELLOW}${BOLD}危险命令确认${RESET} ${DIM}(${reason})${RESET}\r\n` +
           `  ${CYAN}${command}${RESET}\r\n` +
-          `  执行? ${BOLD}y${RESET} 是   ${BOLD}N${RESET} 否(默认)   ${BOLD}e${RESET} 改成别的   `,
+          `  ${DIM}这条命令会真的执行，由你决定：${RESET}${BOLD}y${RESET} 执行   ${BOLD}N${RESET} 取消(默认)   ${BOLD}e${RESET} 改成别的   `,
       );
 
       this.readKeys(
@@ -97,6 +116,47 @@ export class TerminalUI {
           }
         },
         () => {
+          this.hub.release();
+          process.stdout.write('^C\r\n');
+          resolve('no');
+        },
+      );
+    });
+  }
+
+  /**
+   * 需要用户手动输入密码时的提示。
+   * 与「危险命令确认」刻意分开：这不是风险问题，而是「AI 拿不到终端」的能力边界，
+   * 所以要直接告诉用户该手敲哪条命令，而不是含糊地问一句要不要执行。
+   */
+  needAuth(command: string, hint: string, fix?: string): Promise<'yes' | 'no' | 'edit'> {
+    return new Promise((resolve) => {
+      process.stdout.write(
+        `\r\n${YELLOW}${BOLD}这条命令需要你手动输入密码${RESET} ${DIM}(${hint})${RESET}\r\n` +
+          `  ${CYAN}${command}${RESET}\r\n` +
+          `  ${DIM}AI 拿不到终端，代不了你输密码。直接在本会话里手敲上面这条即可，密码提示出来时自己输入。${RESET}\r\n` +
+          (fix ? `  ${DIM}${fix}${RESET}\r\n` : '') +
+          `  还是要让 AI 试一次? ${BOLD}y${RESET} 试(可能卡住)   ${BOLD}N${RESET} 跳过(默认)   ${BOLD}e${RESET} 改成免密写法   `,
+      );
+
+      this.readKeys(
+        (ch) => {
+          if (ch === 'y' || ch === 'Y') {
+            this.hub.release();
+            process.stdout.write('y\r\n');
+            resolve('yes');
+          } else if (ch === 'e' || ch === 'E') {
+            this.hub.release();
+            process.stdout.write('e\r\n');
+            resolve('edit');
+          } else if (ch === '\r' || ch === '\n' || ch === 'n' || ch === 'N' || ch === 'q') {
+            this.hub.release();
+            process.stdout.write('n\r\n');
+            resolve('no');
+          }
+        },
+        () => {
+          this.hub.release();
           process.stdout.write('^C\r\n');
           resolve('no');
         },
@@ -107,7 +167,6 @@ export class TerminalUI {
   /** 让用户在预填的命令基础上改，回车提交，Esc / Ctrl+C 取消 */
   editCommand(initial: string): Promise<string | null> {
     return new Promise((resolve) => {
-      this.hub.release();
       process.stdout.write(`  改成: `);
       let buf = initial;
       process.stdout.write(buf);
@@ -145,6 +204,7 @@ export class TerminalUI {
           }
         },
         () => {
+          this.hub.release();
           process.stdout.write('\r\n');
           resolve(null);
         },

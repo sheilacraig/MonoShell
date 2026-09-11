@@ -64,7 +64,7 @@ async function main() {
     session.shellType === 'cmd'
       ? 'cmd /c exit 3'
       : session.shellType === 'powershell'
-        ? 'Get-Item C:\\no-such-path-xyz'
+        ? 'cmd.exe /c exit 3'
         : '(exit 3)';
   const h2 = captureExec(session, failCmd, session.shellType, 15000, (s) => {
     visible += s;
@@ -74,10 +74,11 @@ async function main() {
   };
   session.onData(off2);
   const r2 = await h2.result;
-  process.stdout.write(`\n退出码测试(${failCmd}): 期望非0 实际=${r2.exitCode} ${r2.exitCode !== 0 ? 'PASS' : 'FAIL'}\n`);
+  const exitCodeOk = r2.exitCode !== 0;
+  process.stdout.write(`\n退出码测试(${failCmd}): 期望非0 实际=${r2.exitCode} ${exitCodeOk ? 'PASS' : 'FAIL'}\n`);
 
   session.close();
-  process.exit(transparentOk && captureOk && scrubOk ? 0 : 1);
+  process.exit(transparentOk && captureOk && scrubOk && exitCodeOk ? 0 : 1);
 }
 
 main().catch((e) => {

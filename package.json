@@ -10,10 +10,14 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/index.js',0o755)\"",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "npm run test:shell && npm run test:agent && npm run test:setup && npm run test:launcher",
+    "test:launcher": "tsx test/launcher.ts",
+    "test:setup": "tsx test/setup.ts",
+    "test:shell": "tsx test/shell.ts",
+    "test:agent": "tsx test/agent.ts"
   },
   "dependencies": {
-    "node-pty": "^1.0.0",
     "openai": "^4.104.0",
     "ssh2": "^1.16.0"
   },

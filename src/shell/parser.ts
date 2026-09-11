@@ -21,6 +21,8 @@ export type ParsedLine = {
  * 轻量 POSIX 风格解析：支持单双引号、反斜杠转义、管道、> >> < 重定向、末尾 &。
  * 不追求完整 shell 语法（不做子 shell、不做 glob 展开以外的展开），够用即可。
  */
+const SHELL_META = new Set([' ', '\t', '"', "'", '|', '&', ';', '>', '<', '$', '\\']);
+
 export function parseLine(line: string): ParsedLine {
   const segments: Segment[] = [];
   let cur: string[] = [];
@@ -71,6 +73,13 @@ export function parseLine(line: string): ParsedLine {
       continue;
     }
     if (ch === '\\' && i + 1 < line.length) {
+      // Windows 下反斜杠常作为路径分隔符，只有转义特殊字符时才吞掉反斜杠
+      if (process.platform === 'win32' && !SHELL_META.has(line[i + 1])) {
+        tok += ch;
+        hasToken = true;
+        i++;
+        continue;
+      }
       tok += line[i + 1];
       hasToken = true;
       i += 2;
@@ -104,6 +113,11 @@ export function parseLine(line: string): ParsedLine {
       let target = '';
       while (i < line.length && line[i] !== ' ' && line[i] !== '|' && line[i] !== '>' && line[i] !== '<') {
         if (line[i] === '\\' && i + 1 < line.length) {
+          if (process.platform === 'win32' && !SHELL_META.has(line[i + 1])) {
+            target += line[i];
+            i++;
+            continue;
+          }
           target += line[i + 1];
           i += 2;
           continue;

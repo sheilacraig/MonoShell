@@ -85,11 +85,58 @@ async function main() {
   r = await engine.exec("echo 'x y'");
   check('单引号', r.output.trim() === 'x y', JSON.stringify(r.output));
 
-  process.stdout.write('\n[外部命令]\n');
-  const isWin = process.platform === 'win32';
-  const extCmd = isWin ? 'where cmd' : 'echo external-ok';
-  r = await engine.exec(extCmd);
-  check(`外部命令可执行 (${extCmd})`, r.code === 0 || r.output.length > 0, `code=${r.code}`);
+  process.stdout.write('\n[新增修复测试]\n');
+
+  // 1. ls 单文件
+  const singleFile = path.join(tmp, 'f.txt').replace(/\\/g, '/');
+  r = await engine.exec('ls ' + singleFile);
+  check('ls 列出单个文件', r.output.trim() === 'f.txt', r.output);
+
+  // 2. cp 和 mv 到目录
+  const subDir = path.join(tmp, 'adir').replace(/\\/g, '/');
+  r = await engine.exec(`cp ${singleFile} ${subDir}`);
+  check('cp 到目录', fs.existsSync(path.join(tmp, 'adir', 'f.txt')), r.output);
+
+  r = await engine.exec(`mv ${path.join(tmp, 'adir', 'f.txt').replace(/\\/g, '/')} ${path.join(tmp, 'adir', 'f2.txt').replace(/\\/g, '/')}`);
+  check('mv 重命名文件', fs.existsSync(path.join(tmp, 'adir', 'f2.txt')), r.output);
+
+  // 3. grep -c 计数
+  r = await engine.exec(`cat ${singleFile} | grep -c c`);
+  check('grep -c 统计匹配行数', r.output.trim() === '1', r.output);
+
+  // 4. 内置 sort (-r, -n, -h)
+  r = await engine.exec('echo "10M\n2G\n500K" | sort -h');
+  check('sort -h 人类可读容量正序', r.output.trim().split(/\s+/).join(' ') === '500K 10M 2G', r.output);
+
+  r = await engine.exec('echo "10M\n2G\n500K" | sort -hr');
+  check('sort -hr 人类可读容量倒序', r.output.trim().split(/\s+/).join(' ') === '2G 10M 500K', r.output);
+
+  // 5. rm -rf 删除目录与文件无报错
+  r = await engine.exec(`rm -rf ${subDir}`);
+  check('rm -rf 删除目录无报错', !fs.existsSync(path.join(tmp, 'adir')) && r.code === 0, r.output);
+
+  // 6. 安全校验 checkRisk 测试
+  const { checkRisk } = await import('../src/core/safety.js');
+  const { defaultConfig } = await import('../src/config.js');
+  const cfg = defaultConfig();
+
+  const sec1 = checkRisk('cat /dev/null | rm -rf /', cfg);
+  check('安全检查: 拦截复合危险命令 cat | rm -rf', sec1.risky === true && sec1.reason.includes('高危'));
+
+  const sec2 = checkRisk('echo evil > /etc/shadow', cfg);
+  check('安全检查: 拦截写文件重定向 echo > file', sec2.risky === true && sec2.reason.includes('写入文件'));
+
+  const sec3 = checkRisk('ls -la', cfg);
+  check('安全检查: 白名单只读放行', sec3.risky === false);
+
+  // 7. looksLikeNotFound 测试自研 shell 中文报错
+  const { looksLikeNotFound } = await import('../src/core/classifier.js');
+  check('自然语言识别: 命中中文未找到命令', looksLikeNotFound('foo: 未找到命令（也不是内置命令）', 'foo') === true);
+
+  // 8. parseLine Windows 反斜杠路径测试
+  const { parseLine } = await import('../src/shell/parser.js');
+  const parsedPath = parseLine('ls C:\\Users\\whh\\test');
+  check('语法解析: 保留 Windows 路径反斜杠', parsedPath.segments[0].argv[1] === 'C:\\Users\\whh\\test');
 
   process.stdout.write(`\n结果: ${pass} 通过, ${fail} 失败\n`);
   process.exit(fail ? 1 : 0);

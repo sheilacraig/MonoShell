@@ -36,7 +36,30 @@ export type SshHost = {
  */
 export type TriggerMode = 'prefix' | 'smart' | 'hybrid';
 
+/** AI 执行策略：迭代轮数 / 失败重试 / 单次调用超时 */
+export type AgentConfig = {
+  /** 单次任务最多迭代轮数：AI「规划 → 执行 → 看输出 → 再规划」的上限，默认 5 */
+  maxRounds: number;
+  /** 单轮模型调用失败后的额外重试次数（0 = 不重试），网络抖动靠它兜 */
+  retries: number;
+  /** 单轮模型调用超时（毫秒） */
+  timeoutMs: number;
+};
+
 export type AppConfig = {
+  /** AI 执行策略（迭代轮数 / 重试 / 超时） */
+  agent: AgentConfig;
+  /**
+   * 启动行为。
+   * - picker（默认）：先进入连接选择（内置的「本地」+ 已保存的远程主机），
+   *   选中并确认后才打开 shell。日常运维面向的是远程主机，本地只是其中一个选项。
+   * - local：跳过选择，直接进入本地内置 shell（旧行为）。
+   */
+  startup: {
+    mode: 'picker' | 'local';
+    /** picker 模式下，某次会话结束后是否回到连接选择界面 */
+    returnToPicker: boolean;
+  };
   llm: LlmProvider;
   shell: {
     /** local 模式使用的 shell，留空则自动探测 */
@@ -63,8 +86,18 @@ export type AppConfig = {
     classifyTimeoutMs: number;
     /** 输入停顿多久后投机预取分类结果 */
     prefetchDebounceMs: number;
-    /** Agent 单轮最多迭代次数 */
-    maxRounds: number;
+    /**
+     * @deprecated 已迁移到 agent.maxRounds。
+     * 仅为兼容老配置保留：若 agent.maxRounds 未显式配置，会读这里的值。
+     */
+    maxRounds?: number;
+    /**
+     * 用户**手敲**的危险命令是否也要二次确认。
+     * AI 生成的命令无论如何都会确认；这一项只管手动输入。
+     * 手敲时只按高危黑名单判定（rm -rf / mkfs / systemctl stop 等），
+     * 不会因为 `echo x > f` 这类日常写文件而反复打扰。
+     */
+    confirmManual: boolean;
   };
   ui: {
     /** AI 说明行的前缀，用注释风格保持单窗口观感 */
@@ -147,6 +180,8 @@ function hasOnPath(bin: string): boolean {
 export function defaultConfig(): AppConfig {
   const s = detectShell();
   return {
+    agent: { maxRounds: 5, retries: 2, timeoutMs: 50_000 },
+    startup: { mode: 'picker', returnToPicker: true },
     llm: {
       name: 'openai',
       apiKey: process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || '',
@@ -166,7 +201,7 @@ export function defaultConfig(): AppConfig {
       allowlist: DEFAULT_ALLOWLIST,
       classifyTimeoutMs: 800,
       prefetchDebounceMs: 400,
-      maxRounds: 5,
+      confirmManual: true,
     },
     ui: { notePrefix: '⃰ ', typeSpeedMs: 18 },
   };
@@ -176,20 +211,39 @@ export function configPath(): string {
   return path.join(os.homedir(), '.ai-shell', 'config.json');
 }
 
+/**
+ * 把磁盘上的原始配置合并到默认配置之上（纯函数，便于单测）。
+ * 老配置里 AI 轮数写在 safety.maxRounds，这里做一次平滑迁移。
+ */
+export function mergeConfig(raw: Partial<AppConfig>, base: AppConfig = defaultConfig()): AppConfig {
+  const rawAgent = (raw.agent || {}) as Partial<AgentConfig>;
+  const legacyRounds = raw.safety?.maxRounds;
+  const agent: AgentConfig = {
+    ...base.agent,
+    ...rawAgent,
+    ...(rawAgent.maxRounds === undefined && typeof legacyRounds === 'number'
+      ? { maxRounds: legacyRounds }
+      : {}),
+  };
+  return {
+    agent,
+    startup: { ...base.startup, ...(raw.startup || {}) },
+    llm: { ...base.llm, ...(raw.llm || {}) },
+    shell: { ...base.shell, ...(raw.shell || {}) },
+    ssh: { hosts: raw.ssh?.hosts ?? base.ssh.hosts },
+    trigger: { ...base.trigger, ...(raw.trigger || {}) },
+    safety: { ...base.safety, ...(raw.safety || {}) },
+    ui: { ...base.ui, ...(raw.ui || {}) },
+  };
+}
+
 export function loadConfig(): AppConfig {
   const p = configPath();
   const cfg = defaultConfig();
   if (fs.existsSync(p)) {
     try {
       const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<AppConfig>;
-      return {
-        llm: { ...cfg.llm, ...(raw.llm || {}) },
-        shell: { ...cfg.shell, ...(raw.shell || {}) },
-        ssh: { hosts: raw.ssh?.hosts ?? cfg.ssh.hosts },
-        trigger: { ...cfg.trigger, ...(raw.trigger || {}) },
-        safety: { ...cfg.safety, ...(raw.safety || {}) },
-        ui: { ...cfg.ui, ...(raw.ui || {}) },
-      };
+      return mergeConfig(raw, cfg);
     } catch (e) {
       process.stderr.write(`配置文件解析失败，使用默认配置: ${(e as Error).message}\n`);
     }

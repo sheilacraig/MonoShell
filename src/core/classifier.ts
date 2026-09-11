@@ -15,7 +15,6 @@ const NL_HINTS = [
   '怎么',
   '如何',
   '为什么',
-  '为什么',
   '查一下',
   '看一下',
   '看看',
@@ -100,9 +99,15 @@ export function heuristic(line: string, pathSet: Set<string> | null): Verdict | 
   if (!t) return 'CMD';
   const lower = t.toLowerCase();
 
-  // 显式前缀：一定走 AI
-  if (/^(ai|AI|Ai)\s/.test(t) || t.startsWith('?') || t.startsWith('？') || t.startsWith('/ai ')) {
-    return 'NL';
+  // 显式前缀：一定走 AI。但 `ai ssh ...` / `ai --local` 等是 ai 自己的子命令，
+  // 用户是想调用 ai 这个程序，不是让它当 AI 干活，必须放行为 CMD 交给 shell。
+  const aiMatch = /^(ai|AI|Ai)\s+(.*)$/.exec(t);
+  if (aiMatch) {
+    const first = aiMatch[2].trim().split(/\s+/)[0].toLowerCase();
+    const aiSub = ['ssh', 'init', 'config', '--local', '--ssh', '--help', '-h', 'help', 'local'];
+    if (!aiSub.includes(first)) return 'NL';
+  } else {
+    if (t.startsWith('?') || t.startsWith('？') || t.startsWith('/ai ')) return 'NL';
   }
 
   const first = t.split(/\s+/)[0];
@@ -232,6 +237,8 @@ export class Classifier {
 export function looksLikeNotFound(output: string, line: string): boolean {
   const o = output.toLowerCase();
   return (
+    /未找到命令/.test(output) ||
+    /不是内置命令/.test(output) ||
     /command not found/.test(o) ||
     /unknown command/.test(o) ||
     /is not recognized as an internal or external command/.test(o) ||
@@ -239,6 +246,6 @@ export function looksLikeNotFound(output: string, line: string): boolean {
     /无法将“.+”项识别为/.test(o) ||
     /commandnotfoundexception/.test(o) ||
     /the term .+ is not recognized/.test(o) ||
-    /no such file or directory/.test(o) && !/^\s*[./~]/.test(line)
+    (/no such file or directory/.test(o) && !/^\s*[./~]/.test(line))
   );
 }

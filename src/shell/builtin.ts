@@ -8,6 +8,7 @@ export type CmdCtx = {
   stdin: string;
   history: string[];
   aliases: Map<string, string>;
+  piped?: boolean;
 };
 
 export type CmdResult = {
@@ -32,6 +33,15 @@ function humanSize(n: number): string {
     i++;
   }
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)}${u[i]}`;
+}
+
+export function parseHumanSize(s: string): number {
+  const m = s.trim().match(/^([0-9.]+)\s*([KkMmGgTtPp]?)(?:i?B)?$/);
+  if (!m) return Number(s) || 0;
+  const num = parseFloat(m[1]);
+  const unit = m[2].toUpperCase();
+  const mult: Record<string, number> = { '': 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4, P: 1024 ** 5 };
+  return num * (mult[unit] ?? 1);
 }
 
 function resolve(p: string, cwd: string): string {
@@ -59,7 +69,7 @@ const commands: Record<string, Handler> = {
   help: () => ({
     out: [
       '内置命令（不依赖系统 shell，Windows / Linux 行为一致）：',
-      '  pwd  cd  ls  cat  head  tail  wc  grep  find  du  df  stat',
+      '  pwd  cd  ls  cat  head  tail  wc  grep  find  du  df  stat  sort',
       '  mkdir  rmdir  touch  rm  cp  mv  echo  env  export  unset',
       '  which  whoami  date  uname  sleep  history  alias  clear  exit',
       '  ai <自然语言>   交给 AI（前缀可在配置里改）',
@@ -86,36 +96,57 @@ const commands: Record<string, Handler> = {
     const long = flags.some((f) => f.includes('l'));
     const all = flags.some((f) => f.includes('a'));
     const targets = args.filter((a) => !a.startsWith('-'));
-    const dirs = targets.length ? targets.map((t) => resolve(t, ctx.cwd)) : [ctx.cwd];
+    const items = targets.length ? targets.map((t) => resolve(t, ctx.cwd)) : [ctx.cwd];
 
     const lines: string[] = [];
-    for (const dir of dirs) {
-      if (dirs.length > 1) lines.push(`${dir}:`);
+    for (const item of items) {
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(item);
+      } catch {
+        lines.push(`ls: 无法访问: ${item}`);
+        continue;
+      }
+
+      if (!st.isDirectory()) {
+        if (long) {
+          const mtime = st.mtime.toISOString().slice(5, 16);
+          lines.push(
+            `-${(st.mode & 0o777).toString(8).padStart(3, '0')} ${humanSize(st.size).padStart(6)} ${mtime} ${path.basename(item)}`,
+          );
+        } else {
+          lines.push(path.basename(item));
+        }
+        continue;
+      }
+
+      if (items.length > 1) lines.push(`${item}:`);
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = fs.readdirSync(item, { withFileTypes: true });
       } catch {
-        lines.push(`ls: 无法访问: ${dir}`);
+        lines.push(`ls: 无法访问: ${item}`);
         continue;
       }
       const list = all ? entries : entries.filter((e) => !e.name.startsWith('.'));
       list.sort((a, b) => a.name.localeCompare(b.name));
       if (long) {
         for (const e of list) {
-          let st: fs.Stats;
+          let subSt: fs.Stats;
           try {
-            st = fs.statSync(path.join(dir, e.name));
+            subSt = fs.statSync(path.join(item, e.name));
           } catch {
             continue;
           }
           const type = e.isDirectory() ? 'd' : '-';
-          const mtime = st.mtime.toISOString().slice(5, 16);
+          const mtime = subSt.mtime.toISOString().slice(5, 16);
           lines.push(
-            `${type}${(st.mode & 0o777).toString(8).padStart(3, '0')} ${humanSize(st.size).padStart(6)} ${mtime} ${e.name}${e.isDirectory() ? '/' : ''}`,
+            `${type}${(subSt.mode & 0o777).toString(8).padStart(3, '0')} ${humanSize(subSt.size).padStart(6)} ${mtime} ${e.name}${e.isDirectory() ? '/' : ''}`,
           );
         }
       } else {
-        lines.push(list.map((e) => (e.isDirectory() ? e.name + '/' : e.name)).join('  '));
+        const sep = ctx.piped ? '\n' : '  ';
+        lines.push(list.map((e) => (e.isDirectory() ? e.name + '/' : e.name)).join(sep));
       }
     }
     return { out: lines.join('\n') };
@@ -213,8 +244,9 @@ const commands: Record<string, Handler> = {
     const insensitive = flags.some((f) => f.includes('i'));
     const showNum = flags.some((f) => f.includes('n'));
     const invert = flags.some((f) => f.includes('v'));
+    const countOnly = flags.some((f) => f.includes('c'));
     const pattern = rest.shift();
-    if (!pattern) return { out: 'usage: grep [-inv] <pattern> [file...]', code: 2 };
+    if (!pattern) return { out: 'usage: grep [-incv] <pattern> [file...]', code: 2 };
     let re: RegExp;
     try {
       re = new RegExp(pattern, insensitive ? 'i' : '');
@@ -222,18 +254,27 @@ const commands: Record<string, Handler> = {
       return { out: `grep: 无效的正则: ${pattern}`, code: 2 };
     }
     const src = rest.length
-      ? rest.map((f) => {
-          try {
-            return fs.readFileSync(resolve(f, ctx.cwd), 'utf8');
-          } catch {
-            return `grep: ${f}: 无法读取`;
-          }
-        }).join('\n')
+      ? rest
+          .map((f) => {
+            try {
+              return fs.readFileSync(resolve(f, ctx.cwd), 'utf8');
+            } catch {
+              return `grep: ${f}: 无法读取`;
+            }
+          })
+          .join('\n')
       : ctx.stdin;
-    const out = src
-      .split('\n')
+
+    const lines = src.split('\n');
+    const matched = lines
       .map((l, i) => ({ l, i }))
-      .filter(({ l }) => (invert ? !re.test(l) : re.test(l)))
+      .filter(({ l }) => (invert ? !re.test(l) : re.test(l)));
+
+    if (countOnly) {
+      return { out: String(matched.length), code: matched.length > 0 ? 0 : 1 };
+    }
+
+    const out = matched
       .map(({ l, i }) => (showNum ? `${i + 1}:${l}` : l))
       .join('\n');
     return { out, code: out ? 0 : 1 };
@@ -283,7 +324,7 @@ const commands: Record<string, Handler> = {
     const summarize = args.some((a) => a.includes('s'));
     const human = args.some((a) => a.includes('h'));
     const depthArg = args.findIndex((a) => a.startsWith('--max-depth'));
-    const depth = depthArg >= 0 ? Number(args[depthArg].split('=')[1] ?? args[depthArg + 1]) || 1 : 1;
+    const maxDepth = depthArg >= 0 ? Number(args[depthArg].split('=')[1] ?? args[depthArg + 1]) || 1 : 1;
     const target = args.find((a) => !a.startsWith('-')) ?? '.';
     const root = resolve(target, ctx.cwd);
 
@@ -311,18 +352,25 @@ const commands: Record<string, Handler> = {
     }
 
     const entries: { p: string; s: number }[] = [];
-    try {
-      for (const e of fs.readdirSync(root, { withFileTypes: true })) {
-        if (!e.isDirectory()) continue;
-        entries.push({ p: path.join(root, e.name), s: sizeOf(path.join(root, e.name)) });
+    const collect = (dir: string, curDepth: number) => {
+      if (curDepth > maxDepth) return;
+      try {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            entries.push({ p: full, s: sizeOf(full) });
+            collect(full, curDepth + 1);
+          }
+        }
+      } catch {
+        /* 忽略 */
       }
-    } catch {
-      return { out: `du: 无法读取 ${target}`, code: 1 };
-    }
+    };
+    collect(root, 1);
+
     entries.sort((a, b) => b.s - a.s);
     const out = entries
-      .slice(0, 20)
-      .map((e) => `${human ? humanSize(e.s) : Math.ceil(e.s / 1024)}\t${path.relative(ctx.cwd, e.p)}`)
+      .map((e) => `${human ? humanSize(e.s) : Math.ceil(e.s / 1024)}\t${path.relative(ctx.cwd, e.p) || '.'}`)
       .join('\n');
     return { out };
   },
@@ -362,6 +410,57 @@ const commands: Record<string, Handler> = {
     } catch {
       return { out: `stat: 无法访问: ${args[0]}`, code: 1 };
     }
+  },
+
+  sort: (args, ctx) => {
+    const flags = args.filter((a) => a.startsWith('-'));
+    const reverse = flags.some((f) => f.includes('r'));
+    const numeric = flags.some((f) => f.includes('n'));
+    const human = flags.some((f) => f.includes('h'));
+    const unique = flags.some((f) => f.includes('u'));
+    let colIdx = 0;
+    const kIdx = args.findIndex((a) => a === '-k');
+    if (kIdx >= 0 && args[kIdx + 1]) {
+      colIdx = Math.max(0, parseInt(args[kIdx + 1], 10) - 1);
+    }
+
+    const files = args.filter((a, i) => !a.startsWith('-') && i !== kIdx + 1);
+    const src = files.length
+      ? files
+          .map((f) => {
+            try {
+              return fs.readFileSync(resolve(f, ctx.cwd), 'utf8');
+            } catch {
+              return '';
+            }
+          })
+          .join('\n')
+      : ctx.stdin;
+
+    let lines = src.split(/\r?\n/).filter((l, i, arr) => (i === arr.length - 1 && !l ? false : true));
+    if (unique) lines = [...new Set(lines)];
+
+    const parseVal = (line: string): number | string => {
+      const parts = line.trim().split(/\s+/);
+      const target = parts[colIdx] ?? line;
+      if (human) return parseHumanSize(target);
+      if (numeric) return parseFloat(target) || 0;
+      return target;
+    };
+
+    lines.sort((a, b) => {
+      const va = parseVal(a);
+      const vb = parseVal(b);
+      let cmp = 0;
+      if (typeof va === 'number' && typeof vb === 'number') {
+        cmp = va - vb;
+      } else {
+        cmp = String(va).localeCompare(String(vb));
+      }
+      return reverse ? -cmp : cmp;
+    });
+
+    return { out: lines.join('\n') };
   },
 
   mkdir: (args, ctx) => {
@@ -404,27 +503,38 @@ const commands: Record<string, Handler> = {
   },
 
   rm: (args, ctx) => {
-    const force = args.includes('-f');
-    const recursive = args.some((a) => a.includes('r') && a.startsWith('-'));
+    const force = args.some((a) => a.startsWith('-') && a.includes('f'));
+    const recursive = args.some((a) => a.startsWith('-') && a.includes('r'));
     const files = args.filter((a) => !a.startsWith('-'));
     if (!files.length) return { out: 'usage: rm [-rf] <path>', code: force ? 0 : 2 };
     for (const f of files) {
       try {
-        fs.rmSync(resolve(f, ctx.cwd), { recursive: recursive || undefined, force: force || undefined });
+        fs.rmSync(resolve(f, ctx.cwd), { recursive: Boolean(recursive), force: Boolean(force) });
       } catch (e) {
-        return { out: `rm: ${f}: ${(e as Error).message}`, code: 1 };
+        if (!force) return { out: `rm: ${f}: ${(e as Error).message}`, code: 1 };
       }
     }
     return { out: '' };
   },
 
   cp: (args, ctx) => {
+    const recursive = args.some((a) => a.startsWith('-') && (a.includes('r') || a.includes('R')));
     const files = args.filter((a) => !a.startsWith('-'));
-    if (files.length < 2) return { out: 'usage: cp <src> <dst>', code: 2 };
-    const dst = resolve(files[files.length - 1], ctx.cwd);
+    if (files.length < 2) return { out: 'usage: cp [-r] <src> <dst>', code: 2 };
+    const rawDst = resolve(files[files.length - 1], ctx.cwd);
+    const isDstDir = fs.existsSync(rawDst) && fs.statSync(rawDst).isDirectory();
+
     for (const src of files.slice(0, -1)) {
+      const srcPath = resolve(src, ctx.cwd);
+      const dstPath = isDstDir ? path.join(rawDst, path.basename(srcPath)) : rawDst;
       try {
-        fs.copyFileSync(resolve(src, ctx.cwd), dst);
+        const srcSt = fs.statSync(srcPath);
+        if (srcSt.isDirectory()) {
+          if (!recursive) return { out: `cp: -r not specified; omitting directory '${src}'`, code: 1 };
+          fs.cpSync(srcPath, dstPath, { recursive: true });
+        } else {
+          fs.copyFileSync(srcPath, dstPath);
+        }
       } catch (e) {
         return { out: `cp: ${(e as Error).message}`, code: 1 };
       }
@@ -433,11 +543,19 @@ const commands: Record<string, Handler> = {
   },
 
   mv: (args, ctx) => {
-    if (args.length < 2) return { out: 'usage: mv <src> <dst>', code: 2 };
-    try {
-      fs.renameSync(resolve(args[0], ctx.cwd), resolve(args[1], ctx.cwd));
-    } catch (e) {
-      return { out: `mv: ${(e as Error).message}`, code: 1 };
+    const files = args.filter((a) => !a.startsWith('-'));
+    if (files.length < 2) return { out: 'usage: mv <src> <dst>', code: 2 };
+    const rawDst = resolve(files[files.length - 1], ctx.cwd);
+    const isDstDir = fs.existsSync(rawDst) && fs.statSync(rawDst).isDirectory();
+
+    for (const src of files.slice(0, -1)) {
+      const srcPath = resolve(src, ctx.cwd);
+      const dstPath = isDstDir ? path.join(rawDst, path.basename(srcPath)) : rawDst;
+      try {
+        fs.renameSync(srcPath, dstPath);
+      } catch (e) {
+        return { out: `mv: ${(e as Error).message}`, code: 1 };
+      }
     }
     return { out: '' };
   },
@@ -531,7 +649,17 @@ export function findOnPath(name: string, env: Record<string, string>): string | 
   if (name.includes('/') || name.includes('\\')) {
     return fs.existsSync(name) ? name : null;
   }
+  const hasExt = isWin && exts.some((ext) => name.toLowerCase().endsWith(ext.toLowerCase()));
   for (const dir of dirs) {
+    if (hasExt) {
+      const direct = path.join(dir, name);
+      try {
+        if (fs.existsSync(direct) && fs.statSync(direct).isFile()) return direct;
+      } catch {
+        /* ignore */
+      }
+      continue;
+    }
     for (const ext of exts) {
       const full = path.join(dir, name + (isWin ? ext.toLowerCase() : ext));
       try {
@@ -539,13 +667,13 @@ export function findOnPath(name: string, env: Record<string, string>): string | 
       } catch {
         /* ignore */
       }
-      if (!isWin) {
-        const direct = path.join(dir, name);
-        try {
-          if (fs.existsSync(direct) && fs.statSync(direct).isFile()) return direct;
-        } catch {
-          /* ignore */
-        }
+    }
+    if (!isWin) {
+      const direct = path.join(dir, name);
+      try {
+        if (fs.existsSync(direct) && fs.statSync(direct).isFile()) return direct;
+      } catch {
+        /* ignore */
       }
     }
   }

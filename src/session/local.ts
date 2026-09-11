@@ -1,8 +1,7 @@
 import path from 'node:path';
-import * as pty from 'node-pty';
+import { spawn } from 'node:child_process';
 import type { AppConfig } from '../config.js';
 import type { Session, ShellType } from './types.js';
-import { termSize } from './types.js';
 
 /** 判断配置文件里指定的 shell 属于哪个家族，决定 Windows / Unix 行为差异 */
 export function shellFamily(program: string): 'windows' | 'unix' {
@@ -25,7 +24,6 @@ export function shellTypeOf(program: string): ShellType {
 export function createLocalSession(cfg: AppConfig): Session {
   const program = cfg.shell.program;
   const family = shellFamily(program);
-  const { cols, rows } = termSize();
 
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -34,23 +32,26 @@ export function createLocalSession(cfg: AppConfig): Session {
     TERM: process.env.TERM || 'xterm-256color',
   };
 
-  const proc = pty.spawn(program, cfg.shell.args ?? [], {
-    name: 'xterm-256color',
-    cols,
-    rows,
+  const child = spawn(program, cfg.shell.args ?? [], {
     cwd: process.cwd(),
     env,
-    useConpty: process.platform === 'win32' ? true : undefined,
-  } as pty.IPtyForkOptions);
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
 
   const listeners: ((data: string) => void)[] = [];
   const exitListeners: ((code: number | null, signal: number | null) => void)[] = [];
 
-  proc.onData((d) => {
-    for (const l of listeners) l(d);
+  child.stdout?.on('data', (d: Buffer) => {
+    const s = d.toString('utf8');
+    for (const l of listeners) l(s);
   });
-  proc.onExit(({ exitCode, signal }) => {
-    for (const l of exitListeners) l(exitCode, signal ?? null);
+  child.stderr?.on('data', (d: Buffer) => {
+    const s = d.toString('utf8');
+    for (const l of listeners) l(s);
+  });
+  child.on('close', (exitCode) => {
+    for (const l of exitListeners) l(exitCode, null);
   });
 
   return {
@@ -58,19 +59,21 @@ export function createLocalSession(cfg: AppConfig): Session {
     label: `local:${path.basename(program)}`,
     osFamily: family,
     shellType: shellTypeOf(program),
-    eol: family === 'windows' ? '\r' : '\n',
-    write: (d) => proc.write(d),
-    onData: (cb) => listeners.push(cb),
-    resize: (c, r) => {
+    eol: family === 'windows' ? '\r\n' : '\n',
+    write: (d) => {
       try {
-        proc.resize(c, r);
+        child.stdin?.write(d);
       } catch {
-        /* 会话已退出 */
+        /* noop */
       }
+    },
+    onData: (cb) => listeners.push(cb),
+    resize: () => {
+      /* standard child_process does not support pty resize */
     },
     close: () => {
       try {
-        proc.kill();
+        child.kill();
       } catch {
         /* noop */
       }
