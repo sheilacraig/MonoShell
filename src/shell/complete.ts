@@ -101,15 +101,16 @@ export function makeRemoteCompleter(usage: UsageStats): Completer {
 
 /** 按当前目录列出匹配的文件名；目录会带 '/'，方便接着补下一层 */
 function completePath(word: string, cwd: string): string[] {
-  const dir = path.dirname(word) || '.';
-  const base = path.basename(word);
+  // 不能用 path.dirname / basename 切：Node 会把末尾分隔符吃掉
+  // （dirname('src/') === '.'、basename('src/') === 'src'），于是 `ls src/`
+  // 被当成「在 cwd 里找以 src 开头的名字」，候选只剩 src 自己 ——
+  // 用户按多少次 Tab 都进不去那个目录。按最后一个分隔符手工切才准。
+  const lastSep = Math.max(word.lastIndexOf('/'), word.lastIndexOf('\\'));
+  const dir = lastSep >= 0 ? word.slice(0, lastSep + 1) : '.';
+  const base = lastSep >= 0 ? word.slice(lastSep + 1) : word;
   const absDir = path.resolve(cwd, dir.replace(/^~/, os.homedir()));
-  const dirPrefix =
-    dir === '.' && !word.startsWith('./') && !word.startsWith('.\\')
-      ? ''
-      : dir.endsWith('/') || dir.endsWith('\\')
-        ? dir
-        : dir + '/';
+  // 带分隔符时直接用原前缀（保序、保住用户敲的 ./ 或绝对路径），否则拼回相对名
+  const dirPrefix = dir === '.' ? '' : dir;
   try {
     return fs
       .readdirSync(absDir)

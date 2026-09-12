@@ -136,14 +136,24 @@ export class ShellEngine {
 
   async exec(line: string, timeoutMs?: number): Promise<ExecOutcome> {
     const stmts = splitStatements(line);
-    let last: ExecOutcome = { output: '', code: 0 };
+    // 逐条累积输出，不能只留最后一条的结果：`echo 1 && echo 2` 只回 "2" 的话，
+    // AI 跑多步探测（echo "---disk---"; df -h; echo "---mem---"; free -m）就只剩
+    // 最后一段，前面的上下文全丢 —— 模型据此判断必然跑偏。
+    let out = '';
+    let code = 0;
     for (const s of stmts) {
       const r = await this.execSingle(s.text, timeoutMs);
-      last = r;
-      if (r.exit || r.clear) return r;
+      // clear 是清屏语义，前面累的输出没有意义，直接短路
+      if (r.clear) return { output: '', code: r.code, clear: true };
+      if (r.output) {
+        // 段与段之间补一个换行；上一段自己以换行收尾时就不再补，免得出现空行
+        out += out && !out.endsWith('\n') ? '\n' + r.output : r.output;
+      }
+      code = r.code;
+      if (r.exit) return { output: out, code, exit: true };
       if (s.joiner === '&&' && r.code !== 0) break;
     }
-    return last;
+    return { output: out, code };
   }
 
   async execSingle(line: string, timeoutMs?: number): Promise<ExecOutcome> {

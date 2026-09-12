@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 export type LlmProvider = {
   name: string;
@@ -252,13 +251,20 @@ export function loadConfig(): AppConfig {
   return cfg;
 }
 
-export function writeDefaultConfig(): string {
+/**
+ * 写出默认配置（已存在则原样不动）。
+ *
+ * 必须把「这次是不是真的创建了」带回去：函数内部一定会保证文件存在，
+ * 调用方再拿 fs.existsSync 判断，全新安装也会被判成「配置已存在」。
+ */
+export function writeDefaultConfig(): { path: string; created: boolean } {
   const p = configPath();
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  if (!fs.existsSync(p)) {
+  const created = !fs.existsSync(p);
+  if (created) {
     fs.writeFileSync(p, JSON.stringify(defaultConfig(), null, 2), 'utf8');
   }
-  return p;
+  return { path: p, created };
 }
 
 /** 写回配置。落盘前先备份一份 .bak，避免手改/向导改错后无法回退 */
@@ -279,5 +285,3 @@ export function saveConfig(cfg: AppConfig): void {
     /* Windows 无 chmod，忽略 */
   }
 }
-
-export const __dirname = path.dirname(fileURLToPath(import.meta.url));

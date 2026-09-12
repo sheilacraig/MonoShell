@@ -77,6 +77,12 @@ check('OSC 标题也剥掉', stripAnsi('\x1b]0;root@host: ~\x07hi').trim() === '
     '多行输出尾部有换行不补',
     externalOutputBytes('a\r\nb\r\n', true) === CLEAR + 'a\r\nb\r\n',
   );
+  // 整块恰好只有一个换行：它承载的是「一个空行」这个真实输出。
+  // 远端程序自己打的空行、或被 TCP 分包单独切出来的换行都会长这样，
+  // 按 trim 判空会把它当控制序列吞掉。
+  check('单独的空行要保留', externalOutputBytes('\n', true) === CLEAR + '\n');
+  check('CRLF 空行要保留', externalOutputBytes('\r\n', true) === CLEAR + '\r\n');
+  check('空白加裸 \\r 仍算控制序列', externalOutputBytes('  \r', true) === '');
 }
 
 process.stdout.write(`\n  ${pass} 项通过，${fail} 项失败\n`);

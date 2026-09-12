@@ -11,8 +11,10 @@ export type ExecResult = {
   promptText?: string;
 };
 
-// 退出码可能为空（例如 PowerShell 里 $LASTEXITCODE 未赋值），所以允许 \d*
-const MARKER_RE_TAIL = /__AIX_[a-z0-9]{6}__:\d*/g;
+// 退出码可能为空（例如 PowerShell 里 $LASTEXITCODE 未赋值），所以允许 \d*；
+// 也可能为负（$LASTEXITCODE = -1 / HRESULT），所以必须带上可选的负号 ——
+// 少了它，`__AIX_x__:-1` 会被解析成「冒号后没数字」= 0，失败命令被当成成功回喂给模型。
+const MARKER_RE_TAIL = /__AIX_[a-z0-9]{6}__:-?\d*/g;
 
 function randId(): string {
   return Math.random().toString(36).slice(2, 8);
@@ -96,7 +98,7 @@ class Scrubber {
     private marker: string,
     private keepLen: number,
   ) {
-    this.markerLine = new RegExp(`[^\\r\\n]*${marker}:\\d*[^\\r\\n]*\\r?\\n?`, 'g');
+    this.markerLine = new RegExp(`[^\\r\\n]*${marker}:-?\\d*[^\\r\\n]*\\r?\\n?`, 'g');
   }
 
   private clean(s: string): string {
@@ -226,7 +228,7 @@ export function captureExec(
       // 却没进用户可见的流 —— 用户会看不到最后一行。
       const visibleNow = scrubber.push(chunk);
       visible += visibleNow;
-      const markerRe = new RegExp(`${marker}:(\\d*)`);
+      const markerRe = new RegExp(`${marker}:(-?\\d*)`);
 
       // 等密码就立刻收手：发出 Ctrl+C 解除远端阻塞，把情况告诉上层
       if (opts.abortOnPrompt !== false && !markerRe.test(collected)) {
@@ -244,7 +246,9 @@ export function captureExec(
 
       const m = markerRe.exec(collected);
       if (m) {
-        // 输出已完整，交给 finish 做最终清理；退出码为空按 0 处理
+        // 输出已完整，交给 finish 做最终清理。
+        // 退出码为空（远端没赋 $LASTEXITCODE）或只有一个 `-` 时按 0 处理；
+        // 负数（-1 / HRESULT）要原样带出去，不能吞成 0 —— 那会让失败看起来像成功。
         finish(m[1] === '' || m[1] === '-' ? 0 : Number(m[1]), false);
       }
       return visibleNow;

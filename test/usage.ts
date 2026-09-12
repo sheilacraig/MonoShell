@@ -219,6 +219,28 @@ async function main() {
     const inArg = local('cat ', 4);
     check('参数位置不再返回命令名', inArg.every((x) => !x.startsWith('cat')), JSON.stringify(inArg.slice(0, 4)));
 
+    // 目录补全：末尾带斜杠时必须列进那个目录，而不是把目录名自身当候选返回
+    const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-cc-'));
+    fs.mkdirSync(path.join(tree, 'src'));
+    fs.writeFileSync(path.join(tree, 'src', 'engine.ts'), '');
+    fs.writeFileSync(path.join(tree, 'src', 'line.ts'), '');
+    const withCwd = makeLocalCompleter(u, () => tree);
+
+    const slash = withCwd('ls src/', 7);
+    check(
+      'src/ 带末尾斜杠时列出子目录内容',
+      slash.includes('src/engine.ts') && !slash.includes('src'),
+      JSON.stringify(slash),
+    );
+    check('src/ 候选带上前缀，方便接着补下一层', slash.every((x) => x.startsWith('src/')), JSON.stringify(slash));
+    check('ls src 仍能补出目录名', withCwd('ls src', 6)[0] === 'src', JSON.stringify(withCwd('ls src', 6)));
+    const dotted = withCwd('ls ./src/', 9);
+    check(
+      './src/ 同样列出子目录内容',
+      dotted.includes('./src/engine.ts') && !dotted.includes('./src'),
+      JSON.stringify(dotted),
+    );
+
     const remote = makeRemoteCompleter(u);
     check('远端空输入给推荐', remote('', 0)[0] === 'ls', JSON.stringify(remote('', 0).slice(0, 5)));
     check('远端参数位置不猜', remote('ls -', 4).length === 0, JSON.stringify(remote('ls -', 4)));

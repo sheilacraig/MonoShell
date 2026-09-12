@@ -66,7 +66,7 @@ async function main() {
   process.stdout.write('\n[多语句与状态]\n');
 
   r = await engine.exec('echo one && echo two');
-  check('&& 连接', r.output.trim() === 'two', JSON.stringify(r.output));
+  check('&& 连接（两段输出都要保留）', r.output.trim() === 'one\ntwo', JSON.stringify(r.output));
 
   r = await engine.exec('cd ' + tmp.replace(/\\/g, '/'));
   check('cd 改变目录', engine.cwd === fs.realpathSync(tmp), engine.cwd);
@@ -75,7 +75,7 @@ async function main() {
   check('未知命令返回 127', r.code === 127, `code=${r.code} out=${r.output}`);
 
   r = await engine.exec('echo first ; echo second');
-  check('; 分隔', r.output.trim() === 'second', JSON.stringify(r.output));
+  check('; 分隔（两段输出都要保留）', r.output.trim() === 'first\nsecond', JSON.stringify(r.output));
 
   process.stdout.write('\n[引号与转义]\n');
 
@@ -114,6 +114,45 @@ async function main() {
   // 5. rm -rf 删除目录与文件无报错
   r = await engine.exec(`rm -rf ${subDir}`);
   check('rm -rf 删除目录无报错', !fs.existsSync(path.join(tmp, 'adir')) && r.code === 0, r.output);
+
+  // 5b. 多语句：每段输出都要保留（以前只留最后一条的结果）
+  r = await engine.exec('echo A; echo B; echo C');
+  check('多语句输出全保留', r.output.trim() === 'A\nB\nC', JSON.stringify(r.output));
+
+  r = await engine.exec('nonexistent-cmd-xyz-123 && echo never');
+  check('&& 前段失败后不再执行', r.code === 127 && !r.output.includes('never'), JSON.stringify(r.output));
+
+  // 5c. cp / mv 多源 + 目标不存在：必须直接报错，不能互相覆盖
+  fs.writeFileSync(path.join(tmp, 'c1.txt'), 'C-ONE\n');
+  fs.writeFileSync(path.join(tmp, 'c2.txt'), 'C-TWO\n');
+  r = await engine.exec('cp c1.txt c2.txt nodir');
+  check(
+    'cp 多源目标不是目录时报错且不落盘',
+    r.code === 1 && !fs.existsSync(path.join(tmp, 'nodir')) && fs.existsSync(path.join(tmp, 'c1.txt')),
+    `${r.code} ${r.output}`,
+  );
+
+  fs.writeFileSync(path.join(tmp, 'm1.txt'), 'M-ONE\n');
+  fs.writeFileSync(path.join(tmp, 'm2.txt'), 'M-TWO\n');
+  r = await engine.exec('mv m1.txt m2.txt mdir');
+  check(
+    'mv 多源目标不是目录时报错且源文件都在',
+    r.code === 1 &&
+      fs.existsSync(path.join(tmp, 'm1.txt')) &&
+      fs.existsSync(path.join(tmp, 'm2.txt')) &&
+      !fs.existsSync(path.join(tmp, 'mdir')),
+    `${r.code} ${r.output}`,
+  );
+
+  // 5d. head / tail 的 coreutils 紧凑写法
+  r = await engine.exec('head -n2 ' + singleFile);
+  check('head -n2 紧凑写法', r.output.trim() === 'a\nb', JSON.stringify(r.output));
+
+  r = await engine.exec('tail -n1 ' + singleFile);
+  check('tail -n1 紧凑写法', r.output.trim() === 'e', JSON.stringify(r.output));
+
+  r = await engine.exec('head -2 ' + singleFile);
+  check('head -2 短横线写法', r.output.trim() === 'a\nb', JSON.stringify(r.output));
 
   // 6. 安全校验 checkRisk 测试
   const { checkRisk } = await import('../src/core/safety.js');

@@ -186,6 +186,21 @@ async function main() {
     check('不误伤含符号的正常行', visible.includes('total: 42, ratio: 67%'), JSON.stringify(visible));
   }
 
+  // 8) 退出码解析：负数不能被吞成 0
+  // Windows / PowerShell 下 $LASTEXITCODE 可能是 -1 或 HRESULT 负数，
+  // 旧正则 `(\d*)` 只认数字，匹配出空串后按 0 处理 —— 失败命令会被判成成功。
+  {
+    const neg = await runCapture((m) => [`\r\n${DF_OUT}\r\n`, `${m}:-1\r\n`]);
+    check('负数退出码原样带出', neg.exitCode === -1, String(neg.exitCode));
+    check('负数退出码不留在文本里', !neg.toModel.includes('-1'), JSON.stringify(neg.toModel));
+
+    const empty = await runCapture((m) => [`\r\n${m}:\r\n`]);
+    check('退出码为空按 0 处理', empty.exitCode === 0, String(empty.exitCode));
+
+    const nonzero = await runCapture((m) => [`\r\n${m}:127\r\n`]);
+    check('普通非零退出码不受影响', nonzero.exitCode === 127, String(nonzero.exitCode));
+  }
+
   process.stdout.write(`\n  ${pass} 项通过，${fail} 项失败\n`);
   if (fail) process.exitCode = 1;
 }

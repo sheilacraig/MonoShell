@@ -395,7 +395,12 @@ function stripAnsi(s: string): string {
  */
 export function externalOutputBytes(chunk: string, protect: boolean): string {
   if (!protect) return chunk;
-  if (!stripAnsi(chunk).trim()) return '';
+  // 判「纯控制序列」不能只看 trim：整块恰好就是一个换行时，stripAnsi 之后 trim
+  // 同样是空串，但它承载的是「一个空行」这个真实输出 —— 远端程序打的空行、
+  // 或被 TCP 分包单独切出来的换行，都会这样被吞掉。
+  // 只有「不含 \n、且去掉 \r 和空白后为空」才算纯控制序列（如 `\x1b[?2004l\r`）。
+  const plain = stripAnsi(chunk);
+  if (!plain.includes('\n') && !plain.replace(/\r/g, '').trim()) return '';
   const tail = /\r?\n$/.test(chunk) ? '' : '\r\n';
   return '\r\x1b[2K' + chunk + tail;
 }

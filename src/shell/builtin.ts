@@ -49,6 +49,37 @@ function resolve(p: string, cwd: string): string {
   return path.isAbsolute(p) ? path.normalize(p) : path.resolve(cwd, p);
 }
 
+/**
+ * 解析 head / tail 的行数参数。
+ *
+ * coreutils 的几种写法都要认，少一种就会出现「参数被静默忽略、回落默认 10 行」
+ * 这种看不出错在哪的行为：`-n 5` / `-n5` / `-5` / `--lines 5`。
+ * 其余 `-` 开头的选项暂时忽略（不当成文件名），剩余参数按文件名返回。
+ */
+function parseLineCount(args: string[], def = 10): { n: number; files: string[] } {
+  let n = def;
+  const files: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '-n' || a === '--lines') {
+      const v = args[i + 1];
+      if (v !== undefined && /^\d+$/.test(v)) {
+        n = Number(v);
+        i++;
+      }
+      continue;
+    }
+    const m = /^-n(\d+)$/.exec(a) || /^-(\d+)$/.exec(a);
+    if (m) {
+      n = Number(m[1]);
+      continue;
+    }
+    if (a.startsWith('-')) continue;
+    files.push(a);
+  }
+  return { n, files };
+}
+
 function walk(dir: string, maxDepth: number, depth = 0, acc: string[] = []): string[] {
   if (depth > maxDepth) return acc;
   let entries: fs.Dirent[];
@@ -174,17 +205,7 @@ const commands: Record<string, Handler> = {
   },
 
   head: (args, ctx) => {
-    const nArg = args.findIndex((a) => a === '-n');
-    let n = 10;
-    let files = args.filter((a) => !a.startsWith('-'));
-    if (nArg >= 0 && args[nArg + 1]) {
-      n = Number(args[nArg + 1]) || 10;
-      files = args.filter((a, i) => !a.startsWith('-') && i !== nArg + 1);
-    } else {
-      // 兼容 `head -5` 这种合并写法（coreutils 支持）
-      const dashN = args.find((a) => /^-\d+$/.test(a));
-      if (dashN) n = Number(dashN.slice(1));
-    }
+    const { n, files } = parseLineCount(args);
     const src = (
       files.length
         ? files
@@ -202,17 +223,7 @@ const commands: Record<string, Handler> = {
   },
 
   tail: (args, ctx) => {
-    const nArg = args.findIndex((a) => a === '-n');
-    let n = 10;
-    let files = args.filter((a) => !a.startsWith('-'));
-    if (nArg >= 0 && args[nArg + 1]) {
-      n = Number(args[nArg + 1]) || 10;
-      files = args.filter((a, i) => !a.startsWith('-') && i !== nArg + 1);
-    } else {
-      // 兼容 `tail -5` 这种合并写法（coreutils 支持）
-      const dashN = args.find((a) => /^-\d+$/.test(a));
-      if (dashN) n = Number(dashN.slice(1));
-    }
+    const { n, files } = parseLineCount(args);
     const src = (
       files.length
         ? files
@@ -537,6 +548,12 @@ const commands: Record<string, Handler> = {
     if (files.length < 2) return { out: 'usage: cp [-r] <src> <dst>', code: 2 };
     const rawDst = resolve(files[files.length - 1], ctx.cwd);
     const isDstDir = fs.existsSync(rawDst) && fs.statSync(rawDst).isDirectory();
+    // 多源文件时目标必须已经是目录（coreutils 直接报错）。
+    // 否则每个源都会落到同一个目标上：cp 前一个被静默覆盖，mv 更狠 —— 源文件被
+    // 改名成目标再被下一条覆盖，源和目标内容一起丢。
+    if (files.length > 2 && !isDstDir) {
+      return { out: `cp: 目标 '${files[files.length - 1]}' 不是目录`, code: 1 };
+    }
 
     for (const src of files.slice(0, -1)) {
       const srcPath = resolve(src, ctx.cwd);
@@ -561,6 +578,11 @@ const commands: Record<string, Handler> = {
     if (files.length < 2) return { out: 'usage: mv <src> <dst>', code: 2 };
     const rawDst = resolve(files[files.length - 1], ctx.cwd);
     const isDstDir = fs.existsSync(rawDst) && fs.statSync(rawDst).isDirectory();
+    // 同 cp：多源 + 目标不是目录时，源文件会被改名成同一个目标并互相覆盖，
+    // 源和目标内容一起丢，必须直接拒绝。
+    if (files.length > 2 && !isDstDir) {
+      return { out: `mv: 目标 '${files[files.length - 1]}' 不是目录`, code: 1 };
+    }
 
     for (const src of files.slice(0, -1)) {
       const srcPath = resolve(src, ctx.cwd);

@@ -251,10 +251,13 @@ export async function runSshShell(cfg: AppConfig, name: string, standalone = tru
   // 兜底第二档（25s）：标记始终没来，停止等待。此时输出早已透传，只留一句
   // 说明，方便排查「远端不是 bash / sh」这类 shell 差异。
   giveUpTimer = setTimeout(() => {
+    giveUpTimer = null;
     if (setupPhase) {
       setupPhase = false;
       flushInit();
-      process.stdout.write(
+      // 走 showRemote 而非裸 process.stdout.write：REPL 已经起来时它会先清掉
+      // 当前输入行再写，不会把用户正在敲的内容糊掉、也不会顶乱提示符。
+      showRemote(
         '\r\n\x1b[2m远端 shell 未响应初始化标记（可能不是 bash / sh），已按普通模式继续。\x1b[0m\r\n',
       );
     }
@@ -318,6 +321,16 @@ export async function runSshShell(cfg: AppConfig, name: string, standalone = tru
         });
       }),
   });
+
+  // 会话收尾：显式收掉两个兜底定时器。
+  // onExit → endSetup 本来也会清 giveUpTimer，但那条路依赖 stream 的 close 事件；
+  // 事件没来时（半关闭 / 异常）定时器会活到 25 秒，对着已经退出的界面吐提示，
+  // 还会拖住 Node 进程的自然退出。这里兜一道，零成本。
+  if (giveUpTimer) {
+    clearTimeout(giveUpTimer);
+    giveUpTimer = null;
+  }
+  clearTimeout(impatientTimer);
 
   closedByRemote = true; // 主动收尾，避免 onExit 再报一次「远端已关闭」
   session.close();

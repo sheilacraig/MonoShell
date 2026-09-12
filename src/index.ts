@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import fs from 'node:fs';
 import { loadConfig, writeDefaultConfig, configPath } from './config.js';
 import { handleSshCommand } from './cli/hosts.js';
 import { runSetupWizard, writeConfigExample } from './cli/setup.js';
@@ -84,8 +83,8 @@ async function main(): Promise<void> {
       );
       return;
     }
-    const p = writeDefaultConfig();
-    process.stdout.write(`${fs.existsSync(p) ? '配置已存在' : '已生成配置'}：${p}\n`);
+    const { path: p, created } = writeDefaultConfig();
+    process.stdout.write(`${created ? '已生成配置' : '配置已存在'}：${p}\n`);
     if (!process.stdin.isTTY) return;
     const go = (await promptLine('现在进入配置引导（一步步问，可直接回车跳过）? [Y/n]: ')).trim().toLowerCase();
     if (go === '' || go === 'y') await runSetupWizard();

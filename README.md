@@ -36,6 +36,7 @@
 - [项目目录结构](#项目目录结构)
 - [已知限制与设计权衡](#已知限制与设计权衡)
 - [本地开发与测试](#本地开发与测试)
+- [打包为单文件可执行程序](#打包为单文件可执行程序)
 
 ---
 
@@ -626,8 +627,8 @@ www-data   14285    1200  0 10:20 ?        00:00:15 /usr/bin/node /app/server.js
 | `cd` | 目录切换，支持 `~` 用户主目录展开，支持绝对与相对路径 |
 | `pwd` | 输出当前工作绝对路径 |
 | `cat` | 支持读取多个文件拼接输出，无参数时读取标准输入 `stdin` |
-| `head` | `-n <行数>` 或 `-N` 合并写法，输出前 N 行（默认 10 行），支持管道与文件输入 |
-| `tail` | `-n <行数>` 或 `-N` 合并写法，输出尾部 N 行（默认 10 行），支持管道与文件输入 |
+| `head` | `-n <行数>` / `-nN` / `-N` / `--lines N` 四种写法都认，输出前 N 行（默认 10 行），支持管道与文件输入 |
+| `tail` | `-n <行数>` / `-nN` / `-N` / `--lines N` 四种写法都认，输出尾部 N 行（默认 10 行），支持管道与文件输入 |
 | `wc` | `-l` 行数统计，输出行数、词数、字节数 |
 | `grep` | `-i` 忽略大小写，`-n` 显示行号，`-v` 反向匹配，支持正则表达式 |
 | `find` | `-name <通配符>` 名称匹配，`-type [f\|d]` 文件/目录类型筛选，`-maxdepth <深度>` 限制检索层级 |
@@ -638,8 +639,8 @@ www-data   14285    1200  0 10:20 ?        00:00:15 /usr/bin/node /app/server.js
 | `rmdir` | 删除指定空目录 |
 | `touch` | 创建新空文件或刷新已有文件修改时间 |
 | `rm` | `-r` / `-R` 递归删除目录，`-f` 强制删除不存在的文件时不报错 |
-| `cp` | `-r` / `-R` 递归拷贝目录，文件直接拷贝 |
-| `mv` | 文件/目录重命名或移动 |
+| `cp` | `-r` / `-R` 递归拷贝目录，文件直接拷贝；多源文件时目标必须是已存在目录（否则报错，不覆盖） |
+| `mv` | 文件/目录重命名或移动；多源文件时目标必须是已存在目录（否则报错，不覆盖） |
 | `echo` | 终端字符输出，支持管道与引号去义 |
 | `env` / `export` / `unset` | 环境变量查看、注入设置与移除销毁 |
 | `which` | 检索指定可执行命令所在的系统绝对物理路径 |
@@ -740,6 +741,41 @@ npm run test:usage       # 使用统计 / 补全决策 / 行编辑器按键路�
 npm run test:handshake   # 远端握手标记判定与远端输出插屏
 npm run test:smoke       # 本地会话透传与输出截获端到端（会真实拉起本地 shell）
 ```
+
+---
+
+## 打包为单文件可执行程序
+
+给没装 Node.js 的机器用，可以直接出一个双击即跑的 `mono.exe`（macOS/Linux 同理）。走的是
+**Node.js 官方 SEA**（Single Executable Application），不引第三方运行时，也不需要 Electron / Tauri
+这类 GUI 壳——本项目的形态就是终端，套壳反而把终端体验做没了。
+
+```bash
+npm run pack
+# 产物：release/mono.exe（Windows） / release/mono（macOS、Linux）
+```
+
+`npm run pack` 一条命令跑完五步（见 `scripts/pack-sea.mjs`）：
+
+| 步骤 | 做什么 |
+|---|---|
+| 1 | `tsc` 编译到 `dist/` |
+| 2 | `esbuild` 把 `dist/index.js` 连同 `openai` / `ssh2` 打成**单个 CJS 文件**（SEA 只接受单文件入口） |
+| 3 | `node --experimental-sea-config` 生成注入用 blob |
+| 4 | 复制当前 Node 二进制作为宿主 |
+| 5 | `postject` 把 blob 注入宿主，产出最终可执行文件 |
+
+几条需要知道的约束：
+
+- **不能交叉编译**：blob 与「平台 + Node 版本」绑定，Windows 的产物只能在 Windows 上打，
+  macOS / Linux 版需在对应平台执行 `npm run pack`（脚本已处理 darwin 的 `NODE_SEA` 段名）。
+- **可选原生依赖被排除**：`ssh2` 的 `cpu-features` / `bcrypt` 走 `--external`，运行期回落到纯 JS 实现，
+  功能不受影响；这也是 SEA 打包最容易翻车的地方。
+- **签名会失效**：注入后宿主 `node.exe` 原有的 Authenticode 签名被破坏，`postject` 会提示
+  `signature corrupted`，属正常现象；要对外分发 Windows 版建议自行签名。
+- **macOS 分发**：只给单文件二进制的话，用户首次运行会被 Gatekeeper 拦，需要签名 + 公证；
+  想做成拖拽安装的 `.dmg`，那属于「给 `.app` 用的封装」，跟本项目的终端形态不是一路。
+- 产物目录 `release/` 已在 `.gitignore` 中，约 85MB，不要提交。
 
 ---
 

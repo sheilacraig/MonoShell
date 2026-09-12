@@ -11,6 +11,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/index.js',0o755)\"",
     "start": "node dist/index.js",
+    "pack": "node scripts/pack-sea.mjs",
     "test": "npm run test:shell && npm run test:agent && npm run test:setup && npm run test:launcher && npm run test:capture && npm run test:usage && npm run test:handshake && npm run test:smoke",
     "test:smoke": "tsx test/smoke.ts",
     "test:handshake": "tsx test/handshake.ts",
@@ -28,6 +29,7 @@
   "devDependencies": {
     "@types/node": "^22.13.0",
     "@types/ssh2": "^1.15.4",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
