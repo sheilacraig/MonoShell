@@ -3,6 +3,7 @@ import { Agent } from '../core/agent.js';
 import { Classifier, looksLikeNotFound } from '../core/classifier.js';
 import { checkRisk } from '../core/safety.js';
 import type { ExecResult } from '../term/capture.js';
+import { watchInterrupt } from '../term/interrupt.js';
 import { InputHub, TerminalUI } from '../term/ui.js';
 import { LineEditor, type Completer } from '../shell/line.js';
 import { getUsage } from '../shell/usage.js';
@@ -13,10 +14,24 @@ export type ReplEnv = {
   completer: Completer;
   history: string[];
   getCwd?: () => string;
-  /** 用户手敲的命令；本地直接执行，SSH 则发给远端 */
-  execUser: (line: string) => Promise<{ output: string; code: number; clear?: boolean; exit?: boolean }>;
+  /**
+   * 用户手敲的命令；本地直接执行，SSH 则发给远端。
+   *
+   * signal 用于把用户的中断（Ctrl+C）传下去。返回的 streamed 表示「输出已经
+   * 实时打到屏幕上了」，此时 output 仍带着完整内容 —— REPL 靠它跑「未找到命令」
+   * 的 AI 兜底，只是不再重复打印一遍。
+   */
+  execUser: (
+    line: string,
+    signal?: AbortSignal,
+  ) => Promise<{ output: string; code: number; clear?: boolean; exit?: boolean; streamed?: boolean }>;
   /** AI 发起的命令，需要拿到输出回灌给模型 */
   execCaptured: (cmd: string, timeoutMs?: number) => Promise<ExecResult>;
+  /**
+   * 用户按下 Ctrl+C：把「正在执行的那条命令」中断掉。
+   * 本地会话走杀子进程，SSH 会话给远端 PTY 发 \x03 并收掉捕获通道。
+   */
+  interrupt?: () => void;
   /**
    * 把命令交回用户自己的终端执行（等同手敲）。
    * SSH 会话提供它：远端是真实 TTY，sudo 密码提示出来用户自己输；
@@ -41,6 +56,9 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
 
   let aborted = false;
   const editor = new LineEditor(env.promptLine, env.history, env.completer, env.getCwd);
+  // 空提示符下按 Ctrl+C：清掉半行输入的同时把中断转给会话 —— 远端可能还有前台
+  // 任务在跑（tail -f / top），本地也可能有命令刚发出去还没回来。
+  editor.onCtrlC = () => env.interrupt?.();
   const classifier = new Classifier(cfg, env.label);
   // 命名避开 index.ts 的 usage() 帮助函数，免得读起来打架
   const stats = getUsage();
@@ -89,18 +107,19 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
     // raw 模式下 Ctrl+C 不会触发 SIGINT，只会作为 \x03 字符进入 stdin，
     // 上面的 process.on('SIGINT') 永远等不到。AI 运行期间盯一下这个字符，
     // 否则「Ctrl+C 中断 AI」形同虚设（stdin 被 editor pause 了，要先 resume）。
-    const onAbortKey = (d: Buffer | string) => {
-      if (String(d).includes('\x03')) aborted = true;
-    };
-    if (isTty) {
-      process.stdin.on('data', onAbortKey);
-      process.stdin.resume();
-    }
+    //
+    // 光置 aborted 还不够：Agent 是等当前命令返回后才检查这个标志的，而底层
+    // 正在跑的子进程 / 远端捕获通道不会自己停下 —— 不通知会话就得干等到超时。
+    const disposeWatch = isTty
+      ? watchInterrupt(() => {
+          aborted = true;
+          env.interrupt?.();
+        })
+      : null;
     try {
       await agent.run(goal, cwd);
     } finally {
-      process.stdin.removeListener('data', onAbortKey);
-      if (isTty) process.stdin.pause();
+      disposeWatch?.();
     }
   };
 
@@ -187,13 +206,40 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
       // 记进去会把「用户习惯」带偏。手敲的即使是危险命令、最终取消，也算一次意图。
       stats.record(cmd);
 
-      const r = await env.execUser(cmd);
+      // 执行期间接管输入，只为第一时间抓到 Ctrl+C：raw 模式下它不产生 SIGINT，
+      // 而输入流已被行编辑器 pause，没有监听者的话 \x03 会被直接丢掉。
+      const ac = new AbortController();
+      const disposeWatch = isTty
+        ? watchInterrupt(() => {
+            // 每一次 Ctrl+C 都要往下转发。用户面对反应慢的命令（远端高延迟、
+            // 进程退得慢）习惯连按好几下，第一下之后 signal 就 aborted 了，
+            // 早先这里直接 return，等于把后面几下全吞掉 —— SSH 场景下那几下
+            // 恰恰是补发 \x03 的唯一机会。abort() 本身幂等，重复调无害。
+            ac.abort();
+            env.interrupt?.();
+          })
+        : null;
+      let r: Awaited<ReturnType<ReplEnv['execUser']>>;
+      try {
+        r = await env.execUser(cmd, ac.signal);
+      } finally {
+        disposeWatch?.();
+      }
+
+      // 用户中断：命令已收尾，直接回提示符。不走进下面的「未找到命令」兜底 ——
+      // 半截命令的输出丢给 AI 只会让它对着残缺上下文胡说。
+      if (ac.signal.aborted) {
+        process.stdout.write('^C\r\n');
+        continue;
+      }
+
       if (r.clear) {
         process.stdout.write('\x1b[2J\x1b[H');
         continue;
       }
       if (r.exit) break;
-      if (r.output) process.stdout.write(r.output.replace(/\n$/, '') + '\n');
+      // 已经实时流式打过一遍的输出不再重复；非流式（或流式没接上的）照旧打一遍
+      if (r.output && !r.streamed) process.stdout.write(r.output.replace(/\n$/, '') + '\n');
 
       // 3) 兜底：说人话却被当成命令，报了「未找到命令」时自动接管。
       // 但 `ai ssh ...` 这类 ai 自身子命令报找不到时，不要接 AI（可能是路径问题），

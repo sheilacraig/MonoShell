@@ -9,6 +9,12 @@ export type CmdCtx = {
   history: string[];
   aliases: Map<string, string>;
   piped?: boolean;
+  /**
+   * 用户按 Ctrl+C 时置为 aborted。
+   * 纯 JS 实现的内置命令（sleep 之类）没有子进程可以被外部杀掉，只能靠这个
+   * 信号自己收手 —— 否则 `sleep 30` 按 Ctrl+C 得眼睁睁等满 30 秒。
+   */
+  signal?: AbortSignal;
 };
 
 export type CmdResult = {
@@ -33,6 +39,32 @@ function humanSize(n: number): string {
     i++;
   }
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)}${u[i]}`;
+}
+
+/**
+ * 可被 Ctrl+C 打断的等待。
+ *
+ * 内置命令跑在同一个事件循环里，外部杀不到它，只能靠 signal 通知；不接这个
+ * 信号的话 `sleep 30` 就是个杀不死的东西 —— 用户按 Ctrl+C 之后得干等 30 秒。
+ * 中断时返回码交给 ShellEngine 统一改写（它才是中断状态的持有者）。
+ */
+function sleepInterruptible(ms: number, signal?: AbortSignal): Promise<CmdResult> {
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout | null = null;
+    const done = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      signal?.removeEventListener('abort', onAbort);
+      resolve({ out: '' });
+    };
+    const onAbort = () => done();
+    timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // 挂监听之前就已经按过 Ctrl+C 了，别让这次等待白等
+    if (signal?.aborted) done();
+  });
 }
 
 export function parseHumanSize(s: string): number {
@@ -645,10 +677,10 @@ const commands: Record<string, Handler> = {
     return { out: os.type() };
   },
 
-  sleep: async (args) => {
+  sleep: (args, ctx) => {
     const sec = Number(args[0]) || 1;
-    await new Promise((r) => setTimeout(r, sec * 1000));
-    return { out: '' };
+    // 走可中断等待：Ctrl+C 时立刻收手，而不是把这一觉睡完
+    return sleepInterruptible(sec * 1000, ctx.signal);
   },
 
   history: (_a, ctx) => ({

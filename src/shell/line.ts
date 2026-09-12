@@ -39,6 +39,16 @@ export class LineEditor {
   /** 当前正在等待的那一次 read 的收尾函数，供外部强制结束（如远端连接断开） */
   private finishCurrent: ((line: string | null) => void) | null = null;
 
+  /**
+   * 用户按下 Ctrl+C 时的回调。会话层用它去中断「正在执行的那条命令」。
+   *
+   * 注意别和 interrupt() 混了 —— 那个是**外部**强制结束本次 read（远端断线用），
+   * 会让 read() 返回 null，而主循环收到 null 就 break 退出整个 shell。
+   * Ctrl+C 绝不能走那条路：用户在空提示符按 Ctrl+C 只是想清掉半行输入，
+   * 不该把程序关掉。所以这里只是「通知」，read() 继续等输入。
+   */
+  onCtrlC?: () => void;
+
   constructor(
     private promptFn: () => string,
     private history: string[],
@@ -180,6 +190,9 @@ export class LineEditor {
         this.buf = '';
         this.cursor = 0;
         process.stdout.write('^C\r\n');
+        // 先清本地输入行，再通知会话：远端可能还有前台任务要收掉
+        // （SSH 场景要把 \x03 转发给远端 PTY，本地场景要杀掉子进程）。
+        this.onCtrlC?.();
         this.render();
         return false;
       case '\x7f':

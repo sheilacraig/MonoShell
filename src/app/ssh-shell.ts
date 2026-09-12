@@ -36,6 +36,8 @@ export async function runSshShell(cfg: AppConfig, name: string, standalone = tru
   }
 
   let activeCapture: ReturnType<typeof captureExec> | null = null;
+  /** 正在等的那次 settle 的放行函数：Ctrl+C 时立刻放行，不让提示符白等 */
+  let activeSettleResolve: (() => void) | null = null;
   let closedByRemote = false;
   const history: string[] = [];
   /** 远端最近一次来数据的时间，用来判断远端是否安静 */
@@ -62,13 +64,18 @@ export async function runSshShell(cfg: AppConfig, name: string, standalone = tru
    */
   const settle = (maxMs: number) =>
     new Promise<void>((resolve) => {
+      const release = () => {
+        if (activeSettleResolve === release) activeSettleResolve = null;
+        resolve();
+      };
+      activeSettleResolve = release;
       const startAt = Date.now();
       const initial = lastDataAt;
       const tick = () => {
         const now = Date.now();
-        if (closedByRemote || now - startAt >= maxMs) return resolve();
+        if (closedByRemote || now - startAt >= maxMs) return release();
         const sawData = lastDataAt > initial || lastDataAt > startAt;
-        if (sawData && now - lastDataAt >= 60) return resolve();
+        if (sawData && now - lastDataAt >= 60) return release();
         setTimeout(tick, 20);
       };
       tick();
@@ -285,6 +292,25 @@ export async function runSshShell(cfg: AppConfig, name: string, standalone = tru
     promptLine: prompt,
     completer: makeRemoteCompleter(getUsage()),
     history,
+    /**
+     * Ctrl+C：把 \x03 交给远端 PTY，由它给前台进程组发 SIGINT —— 这也是真终端
+     * 的做法，ping / tail -f / top 靠这一步才停得下来。
+     *
+     * 这里不需要「远端忙不忙」的启发式：初始化时已经 `stty -echo`，控制字符不再
+     * 回显；远端即使处在空闲提示符，多发一个 \x03 只是让它的 shell 清一次空行，
+     * 屏幕上不会多出东西。屏幕上那个 ^C 是本行编辑器打的。
+     */
+    interrupt: () => {
+      try {
+        session.write('\x03');
+      } catch {
+        /* 连接可能刚好断了 */
+      }
+      // 正在等 settle 的话立刻放行，别让提示符白等那一拍
+      activeSettleResolve?.();
+      // AI 的捕获通道还挂着就立即收手，不用干等到超时
+      activeCapture?.abort();
+    },
     execUser: async (line) => {
       // 用户手敲：直接透传，不包标记（避免交互式命令被标记卡住）
       session.write(line + '\n');
