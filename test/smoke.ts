@@ -26,7 +26,9 @@ async function main() {
   // 等 shell 起来
   await new Promise((r) => setTimeout(r, 1500));
   // 清理可能残留的续行状态（多余的换行会让 PowerShell 进入 >> 模式）
-  session.write('\x03');
+  if (session.shellType === 'powershell') {
+    session.write('\x03');
+  }
 
   // 1) 透传
   raw = '';

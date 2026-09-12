@@ -35,7 +35,7 @@ export function buildWrapped(
     const markerPart = `; $__m="${m}"; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { echo "$($__m):$LASTEXITCODE" } elseif ($?) { echo "$($__m):0" } else { echo "$($__m):1" }`;
     return { full: `${command}${markerPart}`, markerPart };
   }
-  const markerPart = `; __m="${m}"; echo "$__m:$?"`;
+  const markerPart = `; __c=$?; __m="${m}"; echo "$__m:$__c"`;
   return { full: `${command}${markerPart}`, markerPart };
 }
 
@@ -58,7 +58,7 @@ function echoTailPattern(shell: ShellType, m: string): RegExp {
   if (shell === 'cmd') {
     return new RegExp(`^[^\\r\\n]*?\\s*&\\s*set\\s+"__m=[^\\r\\n]*\\r?\\n?`, 'gm');
   }
-  return new RegExp(`^[^\\r\\n]*?;\\s*__m="?${m}[^\\r\\n]*\\r?\\n?`, 'gm');
+  return new RegExp(`^[^\\r\\n]*?;\\s*(?:__c=\\$\\?;\\s*)?__m="?${m}[^\\r\\n]*\\r?\\n?`, 'gm');
 }
 
 /**
@@ -71,7 +71,7 @@ function echoTailPattern(shell: ShellType, m: string): RegExp {
  * 这里再扫一遍含标记 / `$__m:` 的整行片段，把残渣清掉。
  * 真实命令输出几乎不可能包含 `__AIX_` 或 `$__m:`，误伤概率极低。
  */
-const RESIDUE_RE = /[^\r\n]*(?:__AIX_[a-z0-9]{6}__|\$\{?__m\}?:)[^\r\n]*\r?\n?/g;
+const RESIDUE_RE = /[^\r\n]*(?:__AIX_[a-z0-9]{6}__|\$\{?__m\}?:|__c=\$\?)[^\r\n]*\r?\n?/g;
 
 /**
  * 最后一道兜底：回显被折行拦腰截断后剩下的碎片。
@@ -87,7 +87,7 @@ const RESIDUE_RE = /[^\r\n]*(?:__AIX_[a-z0-9]{6}__|\$\{?__m\}?:)[^\r\n]*\r?\n?/g
  *   `\u@\h:\w$ ...` 这类行开头的反斜杠啃掉一个字符。
  * - 字符集里不放 `=`，否则 `===` / `---` 这类分隔线会被当成残渣删掉。
  */
-const ECHO_TAIL_RE = /^[ \t]*[$?";:{}_m\\]+[ \t]*(?:\r?\n|$)/gm;
+const ECHO_TAIL_RE = /^[ \t]*[$?";:{}_mc\\]+[ \t]*(?:\r?\n|$)/gm;
 
 class Scrubber {
   private pending = '';
