@@ -40,7 +40,7 @@ await esbuild.build({
   format: 'cjs',
   target: 'node18',
   outfile: bundle,
-  external: ['cpu-features', 'bcrypt'],
+  external: ['cpu-features', 'bcrypt', '*.node'],
   // 终端里不该出现依赖的弃用告警（punycode 等），在 bundle 最前面关掉
   banner: {
     js: 'process.noDeprecation=true;',
