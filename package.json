@@ -1,6 +1,6 @@
 {
   "name": "monoshell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "单窗口 AI 终端：直接敲命令，也直接说人话。危险命令二次确认。",
   "type": "module",
   "bin": {
