@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import esbuild from 'esbuild';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const release = path.join(root, 'release');
@@ -32,19 +33,19 @@ console.log('· 1/5 编译 TypeScript');
 run([path.join(root, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.json']);
 
 console.log('· 2/5 打包为单个 CJS（排除可选原生依赖）');
-run([
-  path.join(root, 'node_modules/esbuild/bin/esbuild'),
-  path.join(root, 'dist/index.js'),
-  '--bundle',
-  '--platform=node',
-  '--format=cjs',
-  '--target=node18',
-  `--outfile=${bundle}`,
-  '--external:cpu-features',
-  '--external:bcrypt',
+await esbuild.build({
+  entryPoints: [path.join(root, 'dist/index.js')],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node18',
+  outfile: bundle,
+  external: ['cpu-features', 'bcrypt'],
   // 终端里不该出现依赖的弃用告警（punycode 等），在 bundle 最前面关掉
-  '--banner:js=process.noDeprecation=true;',
-]);
+  banner: {
+    js: 'process.noDeprecation=true;',
+  },
+});
 
 console.log('· 3/5 生成 SEA blob');
 // 配置放在仓库根目录：main / output 都用相对根的路径，避免相对路径歧义
