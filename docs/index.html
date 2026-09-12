@@ -120,7 +120,7 @@
       <!-- 顶部通知胶囊 -->
       <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-cyan-950/60 border border-cyan-800/80 text-cyan-300 text-xs sm:text-sm font-medium mb-8">
         <span class="flex h-2 w-2 rounded-full bg-cyan-400 animate-pulse"></span>
-        <span>MonoShell v0.0.1 预览版现已发布 · 单文件零依赖分发</span>
+        <span id="latest-version-badge">MonoShell 最新版现已发布 · 单文件零依赖分发</span>
         <a href="#download" class="hover:underline text-cyan-200">去下载 &rarr;</a>
       </div>
 
@@ -476,6 +476,23 @@
         setTimeout(() => btn.innerHTML = original, 2000);
       });
     }
+
+    // 动态拉取 GitHub 最新 Release 版本号，彻底告别手动修改 HTML
+    (function fetchLatestVersion() {
+      fetch('https://api.github.com/repos/sheilacraig/MonoShell/releases/latest')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data && data.tag_name) {
+            const badge = document.getElementById('latest-version-badge');
+            if (badge) {
+              badge.textContent = `MonoShell ${data.tag_name} 现已发布 · 单文件零依赖分发`;
+            }
+          }
+        })
+        .catch(() => {
+          /* 离线或 API 限流时，保留默认通用文案 */
+        });
+    })();
   </script>
 </body>
 </html>
