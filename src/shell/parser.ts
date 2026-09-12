@@ -73,8 +73,8 @@ export function parseLine(line: string): ParsedLine {
       continue;
     }
     if (ch === '\\' && i + 1 < line.length) {
-      // Windows 下反斜杠常作为路径分隔符，只有转义特殊字符时才吞掉反斜杠
-      if (process.platform === 'win32' && !SHELL_META.has(line[i + 1])) {
+      // 反斜杠常作为路径分隔符（如 Windows 路径），只有转义特殊字符时才吞掉反斜杠
+      if (!SHELL_META.has(line[i + 1])) {
         tok += ch;
         hasToken = true;
         i++;
@@ -113,7 +113,7 @@ export function parseLine(line: string): ParsedLine {
       let target = '';
       while (i < line.length && line[i] !== ' ' && line[i] !== '|' && line[i] !== '>' && line[i] !== '<') {
         if (line[i] === '\\' && i + 1 < line.length) {
-          if (process.platform === 'win32' && !SHELL_META.has(line[i + 1])) {
+          if (!SHELL_META.has(line[i + 1])) {
             target += line[i];
             i++;
             continue;
