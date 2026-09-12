@@ -67,6 +67,16 @@ run(['--experimental-sea-config', cfgPath]);
 
 console.log('· 4/5 复制宿主 node 二进制');
 fs.copyFileSync(process.execPath, out);
+if (!isWin) {
+  try {
+    fs.chmodSync(out, 0o755);
+  } catch {}
+}
+if (process.platform === 'darwin') {
+  try {
+    execFileSync('codesign', ['--remove-signature', out], { stdio: 'inherit' });
+  } catch {}
+}
 
 console.log('· 5/5 注入 blob');
 const injectArgs = [
@@ -79,5 +89,11 @@ const injectArgs = [
 ];
 if (process.platform === 'darwin') injectArgs.push('--macho-segment-name', 'NODE_SEA');
 run(injectArgs);
+
+if (process.platform === 'darwin') {
+  try {
+    execFileSync('codesign', ['--sign', '-', out], { stdio: 'inherit' });
+  } catch {}
+}
 
 console.log(`\n✓ 打包完成 ${path.relative(root, out)} （${(fs.statSync(out).size / 1024 / 1024).toFixed(1)}MB）`);

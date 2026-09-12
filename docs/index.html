@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MonoShell — 自带 Shell 的单窗口 AI 运维终端</title>
+  <meta name="description" content="MonoShell (ai/mono) 是一个自带内置 Shell 的单窗口 AI 终端。直接敲命令，也直接说人话；危险命令二次确认，支持单文件免安装分发。" />
+  <meta name="keywords" content="MonoShell, AI 终端, AI CLI, SSH 客户端, 运维工具, 内置 Shell, 命令行" />
+  
+  <!-- Open Graph -->
+  <meta property="og:title" content="MonoShell — 自带 Shell 的单窗口 AI 运维终端" />
+  <meta property="og:description" content="没有左右分栏，没有聊天气泡，没有笨重 Electron。直接敲命令，也直接说人话。危险命令二次确认。" />
+  <meta property="og:url" content="https://sheilacraig.github.io/MonoShell/" />
+  <meta property="og:type" content="website" />
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfeff',
+              100: '#cffafe',
+              400: '#22d3ee',
+              500: '#06b6d4',
+              600: '#0891b2',
+            },
+            surface: {
+              900: '#090d16',
+              800: '#0f172a',
+              700: '#1e293b',
+              600: '#334155'
+            }
+          },
+          fontFamily: {
+            mono: ['JetBrains Mono', 'Fira Code', 'Menlo', 'Consolas', 'monospace'],
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #090d16;
+      color: #f1f5f9;
+    }
+    .font-mono {
+      font-family: 'Fira Code', monospace;
+    }
+    .grid-bg {
+      background-size: 40px 40px;
+      background-image: 
+        linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    }
+    .glow {
+      box-shadow: 0 0 50px -10px rgba(6, 182, 212, 0.25);
+    }
+    .terminal-scroll::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .terminal-scroll::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col grid-bg antialiased selection:bg-cyan-500 selection:text-black">
+
+  <!-- 顶部导航栏 -->
+  <header class="sticky top-0 z-50 backdrop-blur-md bg-surface-900/80 border-b border-surface-700/60">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-cyan-400 to-indigo-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+          <svg class="w-5 h-5 text-surface-900 font-bold" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3" />
+          </svg>
+        </div>
+        <span class="text-xl font-extrabold tracking-tight text-white">MonoShell</span>
+        <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 font-mono">mono / ai</span>
+      </div>
+
+      <nav class="hidden md:flex items-center space-x-8 text-sm text-slate-300 font-medium">
+        <a href="#features" class="hover:text-cyan-400 transition-colors">核心特性</a>
+        <a href="#demo" class="hover:text-cyan-400 transition-colors">交互演示</a>
+        <a href="#quickstart" class="hover:text-cyan-400 transition-colors">快速上手</a>
+        <a href="#download" class="hover:text-cyan-400 transition-colors">客户端下载</a>
+        <a href="https://github.com/sheilacraig/MonoShell#readme" target="_blank" class="hover:text-cyan-400 transition-colors flex items-center gap-1">
+          使用手册
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+        </a>
+      </nav>
+
+      <div class="flex items-center space-x-3">
+        <a href="https://github.com/sheilacraig/MonoShell" target="_blank" class="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm font-semibold bg-surface-700/80 hover:bg-surface-600 border border-slate-600/60 transition-all hover:scale-105">
+          <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+          </svg>
+          <span>Star on GitHub</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-grow">
+    <!-- Hero 区域 -->
+    <section class="relative pt-20 pb-28 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto text-center">
+      <!-- 顶部通知胶囊 -->
+      <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-cyan-950/60 border border-cyan-800/80 text-cyan-300 text-xs sm:text-sm font-medium mb-8">
+        <span class="flex h-2 w-2 rounded-full bg-cyan-400 animate-pulse"></span>
+        <span>MonoShell v0.0.1 预览版现已发布 · 单文件零依赖分发</span>
+        <a href="#download" class="hover:underline text-cyan-200">去下载 &rarr;</a>
+      </div>
+
+      <!-- 主标题 -->
+      <h1 class="text-4xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight text-white mb-6">
+        单窗口 AI 运维终端<br />
+        <span class="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-teal-300 to-indigo-400">
+          直接敲命令，也直接说人话
+        </span>
+      </h1>
+
+      <!-- 副标题 -->
+      <p class="max-w-3xl mx-auto text-lg sm:text-xl text-slate-300 mb-10 leading-relaxed font-normal">
+        没有左右分栏，没有聊天气泡，没有笨重的 Electron 壳。自带 30+ 常用 Linux 命令，
+        统一各平台体验；AI 思考行内留痕，高危命令强制二次确认。
+      </p>
+
+      <!-- 行动按钮 -->
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-14">
+        <a id="smart-download-btn" href="https://github.com/sheilacraig/MonoShell/releases/latest" target="_blank"
+           class="w-full sm:w-auto px-8 py-4 rounded-xl text-base font-bold bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-surface-900 shadow-lg shadow-cyan-500/25 transition-all hover:scale-105 flex items-center justify-center gap-2">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          <span id="smart-download-text">立即下载最新版 (单文件免安装)</span>
+        </a>
+
+        <div class="flex items-center rounded-xl bg-surface-800 border border-surface-700/80 px-4 py-3.5 text-slate-300 font-mono text-sm shadow-inner group">
+          <span class="text-slate-500 mr-2">$</span>
+          <span class="select-all">npm install -g monoshell</span>
+          <button onclick="copyInstallCmd(this)" title="复制命令" class="ml-3 text-slate-400 hover:text-cyan-300 transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 演示终端卡片 -->
+      <div id="demo" class="max-w-4xl mx-auto rounded-2xl overflow-hidden bg-surface-900 border border-surface-700/80 shadow-2xl glow text-left font-mono text-xs sm:text-sm">
+        <!-- 终端顶栏 -->
+        <div class="bg-surface-800/90 px-4 py-3 border-b border-surface-700 flex items-center justify-between">
+          <div class="flex items-center space-x-2">
+            <div class="w-3 h-3 rounded-full bg-red-500/80"></div>
+            <div class="w-3 h-3 rounded-full bg-yellow-500/80"></div>
+            <div class="w-3 h-3 rounded-full bg-green-500/80"></div>
+          </div>
+          <div class="text-xs text-slate-400 font-sans font-medium flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+            MonoShell · ubuntu@prod-web-01 (172.16.1.86)
+          </div>
+          <div class="text-slate-500 text-xs">Tab 补全 · Ctrl+C 熔断</div>
+        </div>
+
+        <!-- 终端内容区 -->
+        <div class="p-5 sm:p-6 space-y-4 text-slate-200 terminal-scroll overflow-x-auto">
+          <!-- 用户敲命令 -->
+          <div>
+            <span class="text-emerald-400 font-bold">ubuntu@prod-web-01:~$</span>
+            <span class="text-white ml-2">df -h</span>
+          </div>
+          <div class="text-slate-400 leading-relaxed pl-2 text-xs sm:text-sm">
+            Filesystem      Size  Used Avail Use% Mounted on<br>
+            /dev/vda1        40G   35G  2.8G  93% /<br>
+            tmpfs           1.9G     0  1.9G   0% /dev/shm
+          </div>
+
+          <!-- 用户直接输入自然语言 -->
+          <div class="pt-2">
+            <span class="text-emerald-400 font-bold">ubuntu@prod-web-01:~$</span>
+            <span class="text-cyan-300 font-semibold ml-2">ai 根分区使用率 93% 了，找出前 3 大的文件或目录，并尝试清理</span>
+          </div>
+
+          <!-- AI 思考行 (淡色注释) -->
+          <div class="text-slate-500 italic pl-2 border-l-2 border-cyan-500/30 py-1 space-y-1">
+            <div># [AI] 正在分析磁盘占用情况，先扫描根目录下排名前三的大体积目录...</div>
+          </div>
+
+          <!-- AI 执行的第一步命令 -->
+          <div class="text-cyan-400 pl-2">
+            $ du -h --max-depth 1 / 2>/dev/null | sort -hr | head -n 4
+          </div>
+          <div class="text-slate-400 pl-4 text-xs">
+            35G   /<br>
+            18G   /var<br>
+            11G   /app<br>
+            3.2G  /usr
+          </div>
+
+          <!-- AI 进一步向下探查日志 -->
+          <div class="text-slate-500 italic pl-2 border-l-2 border-cyan-500/30 py-1">
+            <div># [AI] 进一步排查 /var，发现 /var/log/syslog 达到 12GB，可截断释放空间</div>
+          </div>
+
+          <!-- 高危拦截门禁展示 -->
+          <div class="bg-amber-950/40 border border-amber-500/40 rounded-lg p-3.5 text-amber-200 pl-4 space-y-1.5">
+            <div class="flex items-center gap-2 font-bold text-amber-400 text-sm">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+              高危命令二次拦截 (Risk Confirmation)
+            </div>
+            <div class="text-xs text-slate-300">即将执行: <code class="text-amber-300 font-bold">&gt; /var/log/syslog</code> (截断系统主日志)</div>
+            <div class="text-xs text-amber-300/80">是否确认执行? (y: 执行 / N: 取消 / e: 现场编辑) [y/N/e]: <span class="bg-amber-400 text-black px-1.5 py-0.2 rounded font-bold animate-pulse">_</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 核心特性卡片网格 -->
+    <section id="features" class="py-20 bg-surface-900/50 border-t border-surface-700/60">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-16">
+          <h2 class="text-xs font-bold uppercase tracking-widest text-cyan-400 mb-2">Features</h2>
+          <p class="text-3xl sm:text-4xl font-extrabold text-white">专为开发者与运维打造的趁手利器</p>
+          <p class="mt-3 text-slate-400 max-w-2xl mx-auto text-base">告别在终端、浏览器、聊天窗口之间来回复制代码的低效工作流。</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+          <!-- 特性 1 -->
+          <div class="p-6 rounded-2xl bg-surface-800/60 border border-surface-700/60 hover:border-cyan-500/50 transition-all hover:-translate-y-1">
+            <div class="w-12 h-12 rounded-xl bg-cyan-950 flex items-center justify-center text-cyan-400 mb-5 border border-cyan-800/60">
+              <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">自研内置 Shell</h3>
+            <p class="text-sm text-slate-300 leading-relaxed">
+              彻底摆脱 Windows PowerShell 的语法怪癖与回显污染。内置 <code>ls</code>, <code>cat</code>, <code>grep</code>, <code>find</code>, <code>du</code>, <code>df</code>, <code>head</code>, <code>tail</code> 等 30+ 核心命令，各平台操作习惯高度一致。
+            </p>
+          </div>
+
+          <!-- 特性 2 -->
+          <div class="p-6 rounded-2xl bg-surface-800/60 border border-surface-700/60 hover:border-cyan-500/50 transition-all hover:-translate-y-1">
+            <div class="w-12 h-12 rounded-xl bg-cyan-950 flex items-center justify-center text-cyan-400 mb-5 border border-cyan-800/60">
+              <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">单窗口原生沉浸</h3>
+            <p class="text-sm text-slate-300 leading-relaxed">
+              没有多余的侧边栏抽屉，没有聊天对话泡泡。AI 的分析思考作为注释行呈现，自动生成的命令像真实手工输入一样留在当前行，保持终端纯粹。
+            </p>
+          </div>
+
+          <!-- 特性 3 -->
+          <div class="p-6 rounded-2xl bg-surface-800/60 border border-surface-700/60 hover:border-cyan-500/50 transition-all hover:-translate-y-1">
+            <div class="w-12 h-12 rounded-xl bg-cyan-950 flex items-center justify-center text-cyan-400 mb-5 border border-cyan-800/60">
+              <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">高危命令双重门禁</h3>
+            <p class="text-sm text-slate-300 leading-relaxed">
+              规则黑名单 + 模型智能审查。凡涉及 <code>rm -rf</code>、服务重启、磁盘格式化等敏感操作，强制行内二次确认（支持 <code>y</code> 执行、<code>N</code> 放弃、<code>e</code> 现场改写）。
+            </p>
+          </div>
+
+          <!-- 特性 4 -->
+          <div class="p-6 rounded-2xl bg-surface-800/60 border border-surface-700/60 hover:border-cyan-500/50 transition-all hover:-translate-y-1">
+            <div class="w-12 h-12 rounded-xl bg-cyan-950 flex items-center justify-center text-cyan-400 mb-5 border border-cyan-800/60">
+              <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/></svg>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">SSH 远程运维深度优化</h3>
+            <p class="text-sm text-slate-300 leading-relaxed">
+              启动即选主机列表，多服务器快速切入；支持私钥与保存密码认证。内置 sudo / su 交互式接管机制，杜绝远端卡死与无回显隐患。
+            </p>
+          </div>
+
+          <!-- 特性 5 -->
+          <div class="p-6 rounded-2xl bg-surface-800/60 border border-surface-700/60 hover:border-cyan-500/50 transition-all hover:-translate-y-1">
+            <div class="w-12 h-12 rounded-xl bg-cyan-950 flex items-center justify-center text-cyan-400 mb-5 border border-cyan-800/60">
+              <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">按使用度智能 Tab 补全</h3>
+            <p class="text-sm text-slate-300 leading-relaxed">
+              记录个人真实输入频次，越常用的命令排在越前面。空输入时直接按 Tab 摊开常用命令推荐；参数智能匹配，多候选补齐最长公共前缀。
+            </p>
+          </div>
+
+          <!-- 特性 6 -->
+          <div class="p-6 rounded-2xl bg-surface-800/60 border border-surface-700/60 hover:border-cyan-500/50 transition-all hover:-translate-y-1">
+            <div class="w-12 h-12 rounded-xl bg-cyan-950 flex items-center justify-center text-cyan-400 mb-5 border border-cyan-800/60">
+              <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">单文件免安装分发</h3>
+            <p class="text-sm text-slate-300 leading-relaxed">
+              基于 Node 官方 Single Executable Application (SEA) 打包，生成独立的 Windows (<code>mono.exe</code>)、macOS 及 Linux 二进制，随身 U 盘即插即用。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 快速上手指南 -->
+    <section id="quickstart" class="py-20 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-14">
+        <h2 class="text-xs font-bold uppercase tracking-widest text-cyan-400 mb-2">Quick Start</h2>
+        <p class="text-3xl font-extrabold text-white">三步即刻开启 AI 运维</p>
+      </div>
+
+      <div class="space-y-6">
+        <!-- 步骤 1 -->
+        <div class="p-6 rounded-2xl bg-surface-800/70 border border-surface-700 flex flex-col md:flex-row items-start gap-6">
+          <div class="w-10 h-10 rounded-full bg-cyan-500/20 text-cyan-300 flex items-center justify-center font-bold text-lg flex-shrink-0 border border-cyan-500/40">1</div>
+          <div class="flex-grow">
+            <h3 class="text-lg font-bold text-white mb-1">下载单文件或 npm 全局安装</h3>
+            <p class="text-sm text-slate-400 mb-3">支持 Windows / Linux / macOS。免环境依赖直接运行：</p>
+            <div class="bg-surface-900 rounded-lg p-3 font-mono text-sm text-cyan-300 flex items-center justify-between border border-surface-700">
+              <code>npm install -g monoshell</code>
+              <span class="text-xs text-slate-500">或在下方下载单文件</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 步骤 2 -->
+        <div class="p-6 rounded-2xl bg-surface-800/70 border border-surface-700 flex flex-col md:flex-row items-start gap-6">
+          <div class="w-10 h-10 rounded-full bg-cyan-500/20 text-cyan-300 flex items-center justify-center font-bold text-lg flex-shrink-0 border border-cyan-500/40">2</div>
+          <div class="flex-grow">
+            <h3 class="text-lg font-bold text-white mb-1">运行向导配置大模型 Key</h3>
+            <p class="text-sm text-slate-400 mb-3">支持 OpenAI、DeepSeek、Claude、Ollama 或任意兼容 OpenAI 协议的本地大模型：</p>
+            <div class="bg-surface-900 rounded-lg p-3 font-mono text-sm text-cyan-300 flex items-center justify-between border border-surface-700">
+              <code>ai setup</code>
+              <span class="text-xs text-slate-500">交互式一步步引导问答</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 步骤 3 -->
+        <div class="p-6 rounded-2xl bg-surface-800/70 border border-surface-700 flex flex-col md:flex-row items-start gap-6">
+          <div class="w-10 h-10 rounded-full bg-cyan-500/20 text-cyan-300 flex items-center justify-center font-bold text-lg flex-shrink-0 border border-cyan-500/40">3</div>
+          <div class="flex-grow">
+            <h3 class="text-lg font-bold text-white mb-1">输入 ai 开启沉浸会话</h3>
+            <p class="text-sm text-slate-400 mb-3">选择本地或远程服务器连接，进去后随便敲命令或直接用中文下达运维任务：</p>
+            <div class="bg-surface-900 rounded-lg p-3 font-mono text-sm text-cyan-300 flex items-center justify-between border border-surface-700">
+              <code>ai</code>
+              <span class="text-xs text-slate-500">启动连接挑选器</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 下载矩阵区域 -->
+    <section id="download" class="py-20 bg-surface-900/80 border-t border-surface-700/60">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-14">
+          <h2 class="text-xs font-bold uppercase tracking-widest text-cyan-400 mb-2">Releases & Download</h2>
+          <p class="text-3xl font-extrabold text-white">下载适用于您操作系统的版本</p>
+          <p class="mt-2 text-slate-400 text-sm">打包均由 GitHub Actions 自动化编译，包含安全哈希校验。</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto">
+          <!-- Windows -->
+          <div class="p-6 rounded-2xl bg-surface-800/90 border border-surface-700 hover:border-cyan-500/60 transition-all flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <span class="text-2xl">🪟</span>
+                <span class="text-xs px-2 py-0.5 rounded bg-surface-700 text-slate-300 font-mono">x64</span>
+              </div>
+              <h3 class="text-lg font-bold text-white">Windows</h3>
+              <p class="text-xs text-slate-400 mt-1 mb-6">Windows 10 / 11 及 Windows Server</p>
+            </div>
+            <div class="space-y-2.5">
+              <a href="https://github.com/sheilacraig/MonoShell/releases/latest/download/monoshell-windows-x64.exe"
+                 class="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-cyan-500 hover:bg-cyan-400 text-surface-900 flex items-center justify-center gap-1.5 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                下载 mono.exe (直接运行)
+              </a>
+              <a href="https://github.com/sheilacraig/MonoShell/releases/latest/download/monoshell-windows-x64.zip"
+                 class="w-full py-2 px-4 rounded-xl text-xs font-medium bg-surface-700/60 hover:bg-surface-600 text-slate-200 flex items-center justify-center transition-colors">
+                下载 .zip 压缩包
+              </a>
+            </div>
+          </div>
+
+          <!-- Linux -->
+          <div class="p-6 rounded-2xl bg-surface-800/90 border border-surface-700 hover:border-cyan-500/60 transition-all flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <span class="text-2xl">🐧</span>
+                <span class="text-xs px-2 py-0.5 rounded bg-surface-700 text-slate-300 font-mono">x64</span>
+              </div>
+              <h3 class="text-lg font-bold text-white">Linux</h3>
+              <p class="text-xs text-slate-400 mt-1 mb-6">Ubuntu, Debian, CentOS, RHEL 等</p>
+            </div>
+            <div class="space-y-2.5">
+              <a href="https://github.com/sheilacraig/MonoShell/releases/latest/download/monoshell-linux-x64.tar.gz"
+                 class="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-cyan-500 hover:bg-cyan-400 text-surface-900 flex items-center justify-center gap-1.5 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                下载 .tar.gz 归档包
+              </a>
+            </div>
+          </div>
+
+          <!-- macOS -->
+          <div class="p-6 rounded-2xl bg-surface-800/90 border border-surface-700 hover:border-cyan-500/60 transition-all flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <span class="text-2xl">🍏</span>
+                <span class="text-xs px-2 py-0.5 rounded bg-surface-700 text-slate-300 font-mono">Apple Silicon</span>
+              </div>
+              <h3 class="text-lg font-bold text-white">macOS</h3>
+              <p class="text-xs text-slate-400 mt-1 mb-6">Apple M1 / M2 / M3 / M4 (arm64)</p>
+            </div>
+            <div class="space-y-2.5">
+              <a href="https://github.com/sheilacraig/MonoShell/releases/latest/download/monoshell-darwin-arm64.tar.gz"
+                 class="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-cyan-500 hover:bg-cyan-400 text-surface-900 flex items-center justify-center gap-1.5 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                下载 .tar.gz 归档包
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- 校验单与全部 Releases 链接 -->
+        <div class="mt-8 text-center text-xs text-slate-500 flex items-center justify-center gap-4">
+          <a href="https://github.com/sheilacraig/MonoShell/releases/latest/download/SHA256SUMS.txt" class="text-cyan-400 hover:underline">下载 SHA256 校验清单</a>
+          <span>·</span>
+          <a href="https://github.com/sheilacraig/MonoShell/releases" class="text-slate-400 hover:text-white">查看全部历史版本</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 页脚 -->
+  <footer class="border-t border-surface-700/60 bg-surface-900 py-10 px-4 sm:px-6 lg:px-8 text-center text-slate-500 text-xs sm:text-sm">
+    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div class="flex items-center space-x-2">
+        <span class="font-bold text-slate-300">MonoShell</span>
+        <span>— Released under the MIT License</span>
+      </div>
+      <div class="flex items-center space-x-6 text-slate-400">
+        <a href="https://github.com/sheilacraig/MonoShell" class="hover:text-cyan-300">GitHub 仓库</a>
+        <a href="https://github.com/sheilacraig/MonoShell/issues" class="hover:text-cyan-300">问题反馈</a>
+        <a href="https://github.com/sheilacraig/MonoShell/releases" class="hover:text-cyan-300">版本列表</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // 智能操作系统识别，动态优化 Hero 按钮文案与直连下载
+    (function detectOS() {
+      const ua = window.navigator.userAgent.toLowerCase();
+      const btn = document.getElementById('smart-download-btn');
+      const txt = document.getElementById('smart-download-text');
+      
+      if (ua.includes('win')) {
+        txt.textContent = '下载 Windows 版 (mono.exe)';
+        btn.href = 'https://github.com/sheilacraig/MonoShell/releases/latest/download/monoshell-windows-x64.exe';
+      } else if (ua.includes('mac')) {
+        txt.textContent = '下载 macOS 版 (.tar.gz)';
+        btn.href = 'https://github.com/sheilacraig/MonoShell/releases/latest/download/monoshell-darwin-arm64.tar.gz';
+      } else if (ua.includes('linux')) {
+        txt.textContent = '下载 Linux 版 (.tar.gz)';
+        btn.href = 'https://github.com/sheilacraig/MonoShell/releases/latest/download/monoshell-linux-x64.tar.gz';
+      }
+    })();
+
+    // 一键复制安装命令
+    function copyInstallCmd(btn) {
+      navigator.clipboard.writeText('npm install -g monoshell').then(() => {
+        const original = btn.innerHTML;
+        btn.innerHTML = '<span class="text-xs text-emerald-400 font-bold font-sans">已复制!</span>';
+        setTimeout(() => btn.innerHTML = original, 2000);
+      });
+    }
+  </script>
+</body>
+</html>
