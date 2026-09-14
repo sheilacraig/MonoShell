@@ -77,10 +77,14 @@ export type AppConfig = {
     fallbackOnNotFound: boolean;
   };
   safety: {
-    /** 命中即拦截并二次确认的正则，注意 Windows 下 cmd/pwsh 也覆盖 */
+    /** 命中即拦截并二次确认的正则，注意 Windows 下 cmd/pwsh 也覆盖。若配置会完全接管内置库 */
     dangerous: string[];
-    /** 命中则永不询问，直接放行 */
+    /** 追加的自定义高危正则（推荐），保留系统内置高危库的同时补充新规则 */
+    extraDangerous?: string[];
+    /** 命中则永不询问，直接放行。若配置会完全接管内置库 */
     allowlist: string[];
+    /** 追加的自定义只读白名单正则，保留系统内置白名单 */
+    extraAllowlist?: string[];
     /** 分类判定超时后乐观放行的毫秒数 */
     classifyTimeoutMs: number;
     /** 输入停顿多久后投机预取分类结果 */
@@ -107,8 +111,8 @@ export type AppConfig = {
 };
 
 const DEFAULT_DANGEROUS: string[] = [
-  '\\brm\\s+(-[a-zA-Z]*f[a-zA-Z]*|-rf)\\b',
-  '\\brm\\s+-[a-zA-Z]*r[a-zA-Z]*\\s+/\\s*$',
+  '\\brm\\s+(?:.*?\\s+)?(-[a-zA-Z]*f[a-zA-Z]*|--force)\\b',
+  '\\brm\\s+(?:.*?\\s+)?(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\\b.*?\\s+/\\*?\\s*$',
   '\\bmkfs\\b',
   '\\bdd\\s+if=',
   ':\\(\\)\\{',
@@ -197,7 +201,9 @@ export function defaultConfig(): AppConfig {
     },
     safety: {
       dangerous: DEFAULT_DANGEROUS,
+      extraDangerous: [],
       allowlist: DEFAULT_ALLOWLIST,
+      extraAllowlist: [],
       classifyTimeoutMs: 800,
       prefetchDebounceMs: 400,
       confirmManual: true,
@@ -225,6 +231,15 @@ export function mergeConfig(raw: Partial<AppConfig>, base: AppConfig = defaultCo
       ? { maxRounds: legacyRounds }
       : {}),
   };
+  const rawSafety = (raw.safety || {}) as Partial<AppConfig['safety']>;
+  const safety: AppConfig['safety'] = {
+    ...base.safety,
+    ...rawSafety,
+    dangerous: rawSafety.dangerous !== undefined ? rawSafety.dangerous : base.safety.dangerous,
+    extraDangerous: rawSafety.extraDangerous ?? base.safety.extraDangerous ?? [],
+    allowlist: rawSafety.allowlist !== undefined ? rawSafety.allowlist : base.safety.allowlist,
+    extraAllowlist: rawSafety.extraAllowlist ?? base.safety.extraAllowlist ?? [],
+  };
   return {
     agent,
     startup: { ...base.startup, ...(raw.startup || {}) },
@@ -232,7 +247,7 @@ export function mergeConfig(raw: Partial<AppConfig>, base: AppConfig = defaultCo
     shell: { ...base.shell, ...(raw.shell || {}) },
     ssh: { hosts: raw.ssh?.hosts ?? base.ssh.hosts },
     trigger: { ...base.trigger, ...(raw.trigger || {}) },
-    safety: { ...base.safety, ...(raw.safety || {}) },
+    safety,
     ui: { ...base.ui, ...(raw.ui || {}) },
   };
 }
@@ -243,6 +258,12 @@ export function loadConfig(): AppConfig {
   if (fs.existsSync(p)) {
     try {
       const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<AppConfig>;
+      if (raw.safety?.dangerous && Array.isArray(raw.safety.dangerous)) {
+        process.stderr.write(
+          '⚠ 警告：检测到配置中指定了 safety.dangerous，已完全替换系统内置高危规则库。\n' +
+            '  若仅需追加自定义规则，建议改用 safety.extraDangerous 保留默认核心防护。\n',
+        );
+      }
       return mergeConfig(raw, cfg);
     } catch (e) {
       process.stderr.write(`配置文件解析失败，使用默认配置: ${(e as Error).message}\n`);

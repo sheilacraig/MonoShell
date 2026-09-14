@@ -7,14 +7,37 @@ export type RiskCheck = {
   matched?: string;
 };
 
+const regexCache = new Map<string, RegExp | null>();
+
+function getCompiledRegex(pattern: string): RegExp | null {
+  if (regexCache.has(pattern)) {
+    return regexCache.get(pattern)!;
+  }
+  try {
+    const re = new RegExp(pattern, 'i');
+    regexCache.set(pattern, re);
+    return re;
+  } catch (e) {
+    process.stderr.write(`[安全警告] 无效的正则表达式 "${pattern}": ${(e as Error).message}\n`);
+    regexCache.set(pattern, null);
+    return null;
+  }
+}
+
 function compile(patterns: string[]): RegExp[] {
-  return patterns.map((p) => {
-    try {
-      return new RegExp(p, 'i');
-    } catch {
-      return new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    }
-  });
+  const res: RegExp[] = [];
+  for (const p of patterns) {
+    const re = getCompiledRegex(p);
+    if (re) res.push(re);
+  }
+  return res;
+}
+
+/** 剥离单引号和双引号内的内容，避免把字符串字面量当命令或重定向判定 */
+export function stripQuotes(s: string): string {
+  return s
+    .replace(/"(?:[^"\\]|\\.)*"/g, '')
+    .replace(/'(?:[^'\\]|\\.)*'/g, '');
 }
 
 /**
@@ -35,8 +58,12 @@ export function checkRisk(command: string, cfg: AppConfig, level: RiskLevel = 'f
   const c = command.trim();
   if (!c) return { risky: false, reason: 'empty' };
 
-  // 1) 高危黑名单优先拦截
-  for (const re of compile(cfg.safety.dangerous)) {
+  // 1) 高危黑名单优先拦截（包含 dangerous 与 extraDangerous）
+  const dangerousPatterns = [
+    ...(cfg.safety.dangerous || []),
+    ...(cfg.safety.extraDangerous || []),
+  ];
+  for (const re of compile(dangerousPatterns)) {
     if (re.test(c)) {
       return { risky: true, reason: '命中高危规则', matched: re.source };
     }
@@ -46,13 +73,19 @@ export function checkRisk(command: string, cfg: AppConfig, level: RiskLevel = 'f
     return { risky: false, reason: '仅高危黑名单档，未命中' };
   }
 
-  // 2) 写文件重定向拦截（排除 > /dev/null）
-  if (/>{1,2}\s*(?!\/dev\/null)\S+/.test(c)) {
+  // 2) 写文件重定向拦截（排除引号内内容、排除文件描述符复制如 2>&1、排除 > /dev/null）
+  const unquoted = stripQuotes(c);
+  const noFdDup = unquoted.replace(/\d?>&\d+/g, ' ').replace(/\d?>&-\b/g, ' ');
+  if (/(?:^|\s|\d)>{1,2}\s*(?!\/dev\/null\b)\S+/.test(noFdDup)) {
     return { risky: true, reason: '会写入文件' };
   }
 
-  // 3) 只读白名单放行
-  for (const re of compile(cfg.safety.allowlist)) {
+  // 3) 只读白名单放行（包含 allowlist 与 extraAllowlist）
+  const allowPatterns = [
+    ...(cfg.safety.allowlist || []),
+    ...(cfg.safety.extraAllowlist || []),
+  ];
+  for (const re of compile(allowPatterns)) {
     if (re.test(c)) return { risky: false, reason: '命中只读白名单', matched: re.source };
   }
 
@@ -89,25 +122,38 @@ export function detectInteractiveAuth(command: string): InteractiveNeed {
   const c = command.trim();
   if (!c) return { needs: false };
 
-  // sudo -n（非交互）或 echo pw | sudo -S 这类已经喂了密码的不算
-  if (/\bsudo\b/.test(c) && !/\bsudo\b\s+(-\S+\s+)*-n\b/.test(c) && !/\bsudo\s+-\S*S\b/.test(c)) {
-    return {
-      needs: true,
-      kind: 'sudo',
-      hint: 'sudo 需要你的登录密码，AI 不能代你输入',
-      fix: '想让它以后能自动跑：给该用户配 NOPASSWD（sudo visudo 加一行 `用户名 ALL=(ALL) NOPASSWD:ALL`）。',
-    };
+  // 剥离引号，避免 echo "sudo is..."、find . -name "sudo" 中的字面量被误判
+  const unquoted = stripQuotes(c);
+
+  // sudo 判定：必须在命令起始位置（行首，或 ; / && / || / | / ( / do / then 之后）
+  const sudoCmdRe = /(?:^|[;&|(]|\b(?:do|then))\s*sudo\b/;
+  if (sudoCmdRe.test(unquoted)) {
+    // sudo -n（非交互）不算
+    const isNonInteractive = /\bsudo\b\s+(-\S+\s+)*-n\b/.test(unquoted);
+    // 前置有管道把密码喂给 sudo -S（如 echo pw | sudo -S cmd）的不算
+    const hasPipedStdin = /(?:^|[\r\n]|;)\s*[^;&|]+\|\s*sudo\b.*-S\b/.test(unquoted);
+
+    if (!isNonInteractive && !hasPipedStdin) {
+      return {
+        needs: true,
+        kind: 'sudo',
+        hint: 'sudo 需要你的登录密码，AI 不能代你输入',
+        fix: '想让它以后能自动跑：给该用户配 NOPASSWD（sudo visudo 加一行 `用户名 ALL=(ALL) NOPASSWD:ALL`）。',
+      };
+    }
   }
 
-  if (/(^|[\s;|&(])su\s/.test(c) || /(^|[\s;|&(])su$/.test(c)) {
+  // su 判定：必须在命令起始位置
+  if (/(?:^|[;&|(]|\b(?:do|then))\s*su(?:\s+.*)?$/.test(unquoted)) {
     return { needs: true, kind: 'su', hint: 'su 切换用户需要输入密码', fix: '建议手敲执行，或直接用 sudo 免密切换。' };
   }
 
-  if (/(^|[\s;|&(])passwd(\s|$)/.test(c)) {
+  // passwd 判定：必须在命令起始位置
+  if (/(?:^|[;&|(]|\b(?:do|then))\s*passwd(?:\s+.*)?$/.test(unquoted)) {
     return { needs: true, kind: 'passwd', hint: 'passwd 必须交互式输入新密码', fix: '这条只能由你手动执行。' };
   }
 
-  if (/\bssh-add\b/.test(c) || /\bssh-keygen\b/.test(c)) {
+  if (/(?:^|[;&|(]|\b(?:do|then))\s*(ssh-add|ssh-keygen)\b/.test(unquoted)) {
     return {
       needs: true,
       kind: 'key-passphrase',
@@ -116,7 +162,10 @@ export function detectInteractiveAuth(command: string): InteractiveNeed {
     };
   }
 
-  if (/\bmysql\b[^|;&]*\s-{1,2}p(\s|$)/.test(c) || /\bpsql\b[^|;&]*\s(-W|--password)\b/.test(c)) {
+  if (
+    /(?:^|[;&|(]|\b(?:do|then))\s*mysql\b[^|;&]*\s-{1,2}p(\s|$)/.test(unquoted) ||
+    /(?:^|[;&|(]|\b(?:do|then))\s*psql\b[^|;&]*\s(-W|--password)\b/.test(unquoted)
+  ) {
     return {
       needs: true,
       kind: 'db-password',
@@ -125,7 +174,7 @@ export function detectInteractiveAuth(command: string): InteractiveNeed {
     };
   }
 
-  if (/(^|[\s;|&(])read\s+-s/.test(c)) {
+  if (/(?:^|[;&|(]|\b(?:do|then))\s*read\s+-s/.test(unquoted)) {
     return { needs: true, kind: 'read-secret', hint: 'read -s 在等交互式输入', fix: '这条只能由你手动执行。' };
   }
 

@@ -93,6 +93,21 @@ const CJK = /[\u4e00-\u9fa5]/;
  * 本地启发式快判：毫秒级、零网络。
  * 返回 null 表示「拿不准」，需要交给 LLM。
  */
+/** ai 程序自身的 CLI 子命令/参数白名单（这些作为命令直接透传给 shell，不交给 AI） */
+export const AI_CLI_SUBCOMMANDS: readonly string[] = [
+  'ssh',
+  'init',
+  'config',
+  'setup',
+  'wizard',
+  '--local',
+  '--ssh',
+  '--help',
+  '-h',
+  'help',
+  'local',
+];
+
 export function heuristic(line: string, pathSet: Set<string> | null): Verdict | null {
   const t = line.trim();
   if (!t) return 'CMD';
@@ -103,8 +118,7 @@ export function heuristic(line: string, pathSet: Set<string> | null): Verdict | 
   const aiMatch = /^(ai|AI|Ai)\s+(.*)$/.exec(t);
   if (aiMatch) {
     const first = aiMatch[2].trim().split(/\s+/)[0].toLowerCase();
-    const aiSub = ['ssh', 'init', 'config', '--local', '--ssh', '--help', '-h', 'help', 'local'];
-    if (!aiSub.includes(first)) return 'NL';
+    if (!AI_CLI_SUBCOMMANDS.includes(first)) return 'NL';
   } else {
     if (t.startsWith('?') || t.startsWith('？') || t.startsWith('/ai ')) return 'NL';
   }

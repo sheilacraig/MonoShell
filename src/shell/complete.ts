@@ -67,23 +67,40 @@ export function makeLocalCompleter(usage: UsageStats, getCwd: () => string): Com
       return usage.rank(all.filter((c) => c.toLowerCase().startsWith(word.toLowerCase())));
     }
 
-    return completePath(word, getCwd());
+    // 检查是否是 cd / pushd / rmdir 这类只接受目录参数的命令
+    const lastStmt = before.split(/[;&|]/).pop() || '';
+    const firstWord = lastStmt.trimStart().split(/\s+/)[0]?.toLowerCase();
+    const onlyDirs = firstWord === 'cd' || firstWord === 'pushd' || firstWord === 'rmdir';
+
+    return completePath(word, getCwd(), { onlyDirs });
   };
 }
 
+export type RemotePathCompleter = (word: string, onlyDirs: boolean) => Promise<string[]> | string[];
+
 /**
  * 远端 SSH 会话：远端文件系统够不着，PATH 也不是本机那份，
- * 所以候选只来自使用记录（在远端跑过的命令同样记在本机），
- * 没有记录时退回一份基础命令表。
+ * 候选来自使用记录（在远端跑过的命令同样记在本机）；没有记录时退回基础命令表。
+ * 若提供了 remotePathCompleter，在参数位置可向远端查询路径补全。
  */
-export function makeRemoteCompleter(usage: UsageStats): Completer {
+export function makeRemoteCompleter(usage: UsageStats, remotePathCompleter?: RemotePathCompleter): Completer {
   return (line, cursor) => {
     const before = line.slice(0, cursor);
     const wordStart = Math.max(before.lastIndexOf(' ') + 1, 0);
-    if (wordStart !== 0) return []; // 参数补全依赖远端状态，不猜
+    const word = before.slice(wordStart);
 
-    const word = before.slice(wordStart).toLowerCase();
-    if (!word) {
+    if (wordStart !== 0) {
+      if (remotePathCompleter) {
+        const lastStmt = before.split(/[;&|]/).pop() || '';
+        const firstWord = lastStmt.trimStart().split(/\s+/)[0]?.toLowerCase();
+        const onlyDirs = firstWord === 'cd' || firstWord === 'pushd' || firstWord === 'rmdir';
+        return remotePathCompleter(word, onlyDirs);
+      }
+      return []; // 未配置远端查询通道时，参数位置不猜
+    }
+
+    const low = word.toLowerCase();
+    if (!low) {
       const top = usage.suggest(16);
       return top.length ? top : [...FALLBACK_COMMANDS].sort().slice(0, 16);
     }
@@ -91,7 +108,7 @@ export function makeRemoteCompleter(usage: UsageStats): Completer {
     const seen = new Set<string>();
     const hits: string[] = [];
     for (const c of [...usage.suggest(80), ...FALLBACK_COMMANDS]) {
-      if (seen.has(c) || !c.toLowerCase().startsWith(word)) continue;
+      if (seen.has(c) || !c.toLowerCase().startsWith(low)) continue;
       seen.add(c);
       hits.push(c);
     }
@@ -99,8 +116,13 @@ export function makeRemoteCompleter(usage: UsageStats): Completer {
   };
 }
 
-/** 按当前目录列出匹配的文件名；目录会带 '/'，方便接着补下一层 */
-function completePath(word: string, cwd: string): string[] {
+export type CompletePathOpts = {
+  /** 仅补全目录（cd / pushd / rmdir 等命令专用） */
+  onlyDirs?: boolean;
+};
+
+/** 按当前目录列出匹配的文件或目录名；当 onlyDirs=true 时仅列出目录 */
+export function completePath(word: string, cwd: string, opts?: CompletePathOpts): string[] {
   // 不能用 path.dirname / basename 切：Node 会把末尾分隔符吃掉
   // （dirname('src/') === '.'、basename('src/') === 'src'），于是 `ls src/`
   // 被当成「在 cwd 里找以 src 开头的名字」，候选只剩 src 自己 ——
@@ -112,10 +134,29 @@ function completePath(word: string, cwd: string): string[] {
   // 带分隔符时直接用原前缀（保序、保住用户敲的 ./ 或绝对路径），否则拼回相对名
   const dirPrefix = dir === '.' ? '' : dir;
   try {
-    return fs
-      .readdirSync(absDir)
-      .filter((f) => f.startsWith(base))
-      .map((f) => (dirPrefix ? dirPrefix + f : f))
+    const entries = fs.readdirSync(absDir, { withFileTypes: true });
+    const isWin = process.platform === 'win32';
+    const baseLow = base.toLowerCase();
+
+    return entries
+      .filter((e) => {
+        if (opts?.onlyDirs) {
+          if (!e.isDirectory() && !e.isSymbolicLink()) return false;
+          if (e.isSymbolicLink()) {
+            try {
+              if (!fs.statSync(path.join(absDir, e.name)).isDirectory()) return false;
+            } catch {
+              return false;
+            }
+          }
+        }
+        // 大小写匹配：Windows 下大小写不敏感；在 Unix 下若输入全小写也做忽略大小写的前缀匹配
+        if (isWin || base === baseLow) {
+          return e.name.toLowerCase().startsWith(baseLow);
+        }
+        return e.name.startsWith(base);
+      })
+      .map((e) => (dirPrefix ? dirPrefix + e.name : e.name))
       .sort();
   } catch {
     return [];

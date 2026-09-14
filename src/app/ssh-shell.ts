@@ -290,7 +290,53 @@ export async function runSshShell(cfg: AppConfig, name: string, standalone = tru
       writeRemote = write;
     },
     promptLine: prompt,
-    completer: makeRemoteCompleter(getUsage()),
+    completer: makeRemoteCompleter(getUsage(), async (word, onlyDirs) => {
+      if (!session.execQuery) return [];
+      /**
+       * 远端补全查询。
+       *
+       * word 是用户（或 AI 建议的命令）敲到一半的片段，会被拼进远端 shell 命令行，
+       * 必须当成不可信输入处理。
+       *
+       * 安全做法是**只用一层单引号**包裹 word：
+       * - 单引号内除 `'` 本身外一切字符都是字面量，$ / ` / " / \ 都不会被展开；
+       * - 历史写法 `bash -c "compgen -f '<word>'"` 是外层双引号 + 内层单引号，
+       *   却只转义了单引号 —— 含 `"` 的 word 会提前闭合外层双引号，含 $ / 反引号
+       *   的会在外层先被展开，等于把补全缓冲变成远端命令注入点。
+       * 教训：不要让同一个值穿过两层不同的引号上下文。
+       *
+       * `'\''` 是 POSIX 标准转义：结束当前单引号、插入转义单引号、再重新开单引号。
+       *
+       * 这里不再套 `bash -c`：conn.exec 本来就在远端登录 shell 里执行，compgen 作为
+       * builtin 可直接用；多套一层只会多一层引号上下文要照顾。
+       */
+      const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+      /*
+       * compgen 的签名是 `compgen [-V varname] [option] [word]`，**没有 `--`
+       * 选项终止符**，传 `--` 会被当成 word 本身、补全结果直接错掉。
+       * 这里不给 word 加 ./ 前缀去防「前导 -」——那样补全结果会带着 ./ 回来，
+       * 回填到输入行变成 `./-foo`，反而错得更明显。以 `-` 开头的文件名是极边缘
+       * 场景，保持朴素即可。ls 是外部命令，`--` 是它的标准终止符，可以放心用。
+       */
+      const prefix = quote(word);
+      // compgen 优先（bash builtin，不依赖 PATH）；远端登录 shell 不是 bash 时
+      // 退回 ls。两条都失败只会静默返回空 —— 补不出来而已，不打断输入。
+      // 结尾的 * 故意留在引号外，交给远端 shell 做 glob 展开。
+      const cmd = onlyDirs
+        ? `compgen -d -S / ${prefix} 2>/dev/null || ls -d -p -- ${prefix}* 2>/dev/null`
+        : `compgen -f ${prefix} 2>/dev/null || ls -d -p -- ${prefix}* 2>/dev/null`;
+      try {
+        const out = await session.execQuery(cmd, 1500);
+        const lines = out
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+        return onlyDirs ? lines.filter((l) => l.endsWith('/')) : lines;
+      } catch {
+        return [];
+      }
+    }),
     history,
     /**
      * Ctrl+C：把 \x03 交给远端 PTY，由它给前台进程组发 SIGINT —— 这也是真终端

@@ -177,6 +177,72 @@ async function main() {
   const parsedPath = parseLine('ls C:\\Users\\whh\\test');
   check('语法解析: 保留 Windows 路径反斜杠', parsedPath.segments[0].argv[1] === 'C:\\Users\\whh\\test');
 
+  // 9. find -maxdepth 语义测试
+  const depthDir = path.join(tmp, 'depthT');
+  fs.mkdirSync(path.join(depthDir, 'a', 'b', 'c'), { recursive: true });
+  fs.writeFileSync(path.join(depthDir, 'a', 'b', 'c', 'deep.txt'), 'hello recursive deep');
+  const dNorm = depthDir.replace(/\\/g, '/');
+
+  const pA = path.join(depthDir, 'a');
+  const pB = path.join(depthDir, 'a', 'b');
+  const pC = path.join(depthDir, 'a', 'b', 'c');
+  const pFile = path.join(depthDir, 'a', 'b', 'c', 'deep.txt');
+
+  r = await engine.exec(`find ${dNorm} -maxdepth 1`);
+  check('find -maxdepth 1 仅列出直接子项', r.output.includes(pA) && !r.output.includes(pB), r.output);
+
+  r = await engine.exec(`find ${dNorm} -maxdepth 2`);
+  check('find -maxdepth 2 列出两层子项', r.output.includes(pA) && r.output.includes(pB) && !r.output.includes(pC), r.output);
+
+  r = await engine.exec(`find ${dNorm} -maxdepth 3`);
+  check('find -maxdepth 3 列出三层子项', r.output.includes(pC) && !r.output.includes(pFile), r.output);
+
+  r = await engine.exec(`find ${dNorm} -maxdepth 4`);
+  check('find -maxdepth 4 列出深层文件', r.output.includes(pFile), r.output);
+
+  // 10. grep -r 递归目录测试
+  r = await engine.exec(`grep hello ${dNorm}`);
+  check('grep 目录不加 -r 明确报错 (code 2)', r.code === 2 && r.output.includes('是一个目录'), `${r.code}: ${r.output}`);
+
+  r = await engine.exec(`grep -r hello ${dNorm}`);
+  check('grep -r 递归搜索目录返回命中行', r.code === 0 && r.output.includes('deep.txt') && r.output.includes('hello recursive'), `${r.code}: ${r.output}`);
+
+  // 11. 校验 safety.extraDangerous 与内置规则保持生效
+  const { mergeConfig } = await import('../src/config.js');
+  const userCfg = mergeConfig({
+    safety: { extraDangerous: ['\\bmycmd\\b'] } as never,
+  });
+  check('extraDangerous 保持内置 29 条规则生效', userCfg.safety.dangerous.length >= 29);
+  check('extraDangerous 自定义规则生效', checkRisk('mycmd', userCfg).risky === true);
+  check('内置 rm -rf / 规则未被冲掉', checkRisk('rm -rf /', userCfg).risky === true);
+
+  // 12. rm 长选项支持
+  check('rm --force -r 拦截', checkRisk('rm --force -r /tmp/a', cfg).risky === true);
+  check('rm -r --force 拦截', checkRisk('rm -r --force /tmp/a', cfg).risky === true);
+  check('rm -r -f 拦截', checkRisk('rm -r -f /tmp/a', cfg).risky === true);
+
+  // 13. 重定向与引号判定
+  check('引号内的 > 不误拦', checkRisk('echo "a > b"', cfg).risky === false);
+  check('单引号内的 > 不误拦', checkRisk("echo 'a > b'", cfg).risky === false);
+  check('cmd 2>&1 不误拦', checkRisk('cmd 2>&1', cfg).risky === false);
+  check('cmd > /dev/null 2>&1 不误拦', checkRisk('cmd > /dev/null 2>&1', cfg).risky === false);
+  check('真实写文件重定向拦截', checkRisk('echo hi > out.txt', cfg).risky === true);
+
+  // 14. detectInteractiveAuth 误判修复
+  const { detectInteractiveAuth } = await import('../src/core/safety.js');
+  check('echo 中的 sudo 不误判', detectInteractiveAuth('echo "sudo is a tool"').needs === false);
+  check('grep 参数中的 sudo 不误判', detectInteractiveAuth('grep sudo /etc/x').needs === false);
+  check('find 参数中的 sudo 不误判', detectInteractiveAuth('find . -name sudo').needs === false);
+  check('命令位置的 sudo 正常识别', detectInteractiveAuth('sudo apt update').needs === true);
+  check('无管道的 sudo -S 需密码输入', detectInteractiveAuth('sudo -S apt update').needs === true);
+  check('管道输入的 sudo -S 视为已喂密码', detectInteractiveAuth('echo pw | sudo -S apt update').needs === false);
+
+  // 15. alias 展开防安全绕过
+  engine.aliases.set('rm2', 'rm -rf');
+  const aliasExpanded = engine.expandAlias('rm2 /tmp/a');
+  check('expandAlias 展开别名', aliasExpanded === 'rm -rf /tmp/a');
+  check('checkRisk 作用于展开后的别名', checkRisk(aliasExpanded, cfg, 'dangerous').risky === true);
+
   process.stdout.write(`\n结果: ${pass} 通过, ${fail} 失败\n`);
   process.exit(fail ? 1 : 0);
 }

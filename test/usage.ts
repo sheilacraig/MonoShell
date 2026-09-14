@@ -215,16 +215,28 @@ async function main() {
       JSON.stringify(d.slice(0, 12)),
     );
 
-    // 参数位置走路径补全，候选是文件名而不是命令名
-    const inArg = local('cat ', 4);
-    check('参数位置不再返回命令名', inArg.every((x) => !x.startsWith('cat')), JSON.stringify(inArg.slice(0, 4)));
+    // 参数位置走路径补全，候选是文件名而不是命令名（用干净临时目录，避免受系统全局 TEMP 污染）
+    const cleanArgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-arg-'));
+    fs.writeFileSync(path.join(cleanArgDir, 'argfile.txt'), '');
+    const localArg = makeLocalCompleter(u, () => cleanArgDir);
+    const inArg = localArg('cat ', 4);
+    check('参数位置不再返回命令名', !inArg.includes('cat') && inArg.includes('argfile.txt'), JSON.stringify(inArg.slice(0, 4)));
 
     // 目录补全：末尾带斜杠时必须列进那个目录，而不是把目录名自身当候选返回
     const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-cc-'));
     fs.mkdirSync(path.join(tree, 'src'));
     fs.writeFileSync(path.join(tree, 'src', 'engine.ts'), '');
     fs.writeFileSync(path.join(tree, 'src', 'line.ts'), '');
+    // 放入同前缀的目录与文件，验证 cd 仅补全目录
+    fs.mkdirSync(path.join(tree, 'bm_dir'));
+    fs.writeFileSync(path.join(tree, 'bm_file.txt'), '');
+
     const withCwd = makeLocalCompleter(u, () => tree);
+
+    const cdBm = withCwd('cd bm', 5);
+    check('cd 命令只补全目录排除普通文件', cdBm.includes('bm_dir') && !cdBm.includes('bm_file.txt'), JSON.stringify(cdBm));
+    const lsBm = withCwd('ls bm', 5);
+    check('ls 命令同时补全目录与文件', lsBm.includes('bm_dir') && lsBm.includes('bm_file.txt'), JSON.stringify(lsBm));
 
     const slash = withCwd('ls src/', 7);
     check(
@@ -241,9 +253,35 @@ async function main() {
       JSON.stringify(dotted),
     );
 
+    // 根目录下以 bm 开头的目录补全测试（创建测试目录并在验证后立即删除）
+    const isWin = process.platform === 'win32';
+    if (isWin) {
+      const winRootCd = withCwd('cd /u', 5);
+      check('Windows 根目录小写 /u 能不区分大小写匹配出 /Users', winRootCd.includes('/Users'), JSON.stringify(winRootCd));
+
+      try {
+        fs.mkdirSync('C:\\bm_test_spec', { recursive: true });
+        const bmHits = withCwd('cd /bm', 6);
+        check('cd /bm 成功补全根目录下以 bm 开头的目录', bmHits.includes('/bm_test_spec'), JSON.stringify(bmHits));
+      } finally {
+        try {
+          fs.rmdirSync('C:\\bm_test_spec');
+        } catch {
+          /* noop */
+        }
+      }
+    }
+
     const remote = makeRemoteCompleter(u);
     check('远端空输入给推荐', remote('', 0)[0] === 'ls', JSON.stringify(remote('', 0).slice(0, 5)));
     check('远端参数位置不猜', remote('ls -', 4).length === 0, JSON.stringify(remote('ls -', 4)));
+
+    // 远端提供路径补全器时，参数位置返回远端路径
+    const remoteWithPath = makeRemoteCompleter(u, async (w, onlyDirs) => {
+      return onlyDirs ? ['/boot/', '/bin/'] : ['/boot', '/bin'];
+    });
+    const rCand = await remoteWithPath('cd /b', 5);
+    check('远端路径补全器支持异步返回目录候选', Array.isArray(rCand) && rCand.includes('/boot/'), JSON.stringify(rCand));
 
     const freshRemote = makeRemoteCompleter(new UsageStats(tmpFile('fallback')));
     check(

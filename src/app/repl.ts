@@ -1,6 +1,6 @@
 import type { AppConfig } from '../config.js';
 import { Agent } from '../core/agent.js';
-import { Classifier, looksLikeNotFound } from '../core/classifier.js';
+import { Classifier, looksLikeNotFound, AI_CLI_SUBCOMMANDS } from '../core/classifier.js';
 import { checkRisk } from '../core/safety.js';
 import type { ExecResult } from '../term/capture.js';
 import { watchInterrupt } from '../term/interrupt.js';
@@ -14,6 +14,7 @@ export type ReplEnv = {
   completer: Completer;
   history: string[];
   getCwd?: () => string;
+  expandAlias?: (line: string) => string;
   /**
    * 用户手敲的命令；本地直接执行，SSH 则发给远端。
    *
@@ -152,8 +153,7 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
         // 否则 apiKey 未配置时会无限卡死。这些走普通命令透传即可。
         const rest = t.slice(hit.length).trim();
         const first = rest.split(/\s+/)[0].toLowerCase();
-        const aiSub = ['ssh', 'init', 'config', '--local', '--ssh', '--help', '-h', 'help', 'local'];
-        if (aiSub.includes(first)) {
+        if (AI_CLI_SUBCOMMANDS.includes(first)) {
           isAiGoal = false;
         } else {
           isAiGoal = true;
@@ -179,13 +179,16 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
       // 2) 普通命令
       // 手敲的危险命令也要确认（默认开启，safety.confirmManual 可关）。
       // 只按高危黑名单判定，不会因为 `echo x > f` 这类日常写文件而打扰。
+      // 先做 alias 展开判定，避免 rm2='rm -rf' 别名绕过安全检查。
       // 非交互（管道 / 脚本）与 SSH 会话不拦：前者没法问、后者远端是真实主机，
       // 误判会打断正常运维节奏。
       let cmd = t;
+      const expandedCmd = env.expandAlias ? env.expandAlias(cmd) : cmd;
       if (cfg.safety.confirmManual && env.label === 'local' && isTty) {
-        const risk = checkRisk(cmd, cfg, 'dangerous');
+        const risk = checkRisk(expandedCmd, cfg, 'dangerous');
         if (risk.risky) {
-          const ans = await ui.confirm(cmd, risk.reason);
+          const displayCmd = expandedCmd !== cmd ? `${cmd} (别名展开: ${expandedCmd})` : cmd;
+          const ans = await ui.confirm(displayCmd, risk.reason);
           if (ans === 'no') {
             ui.note('已取消，未执行。');
             continue;

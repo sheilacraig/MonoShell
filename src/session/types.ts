@@ -34,6 +34,8 @@ export interface Session extends SessionContext {
   close(): void;
   /** 会话结束（shell 退出 / 连接断开）时触发 */
   onExit(cb: (code: number | null, signal: number | null) => void): void;
+  /** 可选：执行一条轻量查询命令并返回 stdout（用于补全等旁路查询，不影响主 shell 通道） */
+  execQuery?: (cmd: string, timeoutMs?: number) => Promise<string>;
 }
 
 export function termSize(): { cols: number; rows: number } {

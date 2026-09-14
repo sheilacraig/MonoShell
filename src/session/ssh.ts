@@ -74,6 +74,42 @@ export function createSshSession(host: SshHost): Promise<Session> {
             conn.end();
           },
           onExit: (cb) => exitListeners.push(cb),
+          execQuery: (cmd: string, timeoutMs = 2000) =>
+            new Promise<string>((resolve) => {
+              let timer: NodeJS.Timeout | null = null;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              let streamRef: any = null;
+              const done = (out: string) => {
+                if (timer) {
+                  clearTimeout(timer);
+                  timer = null;
+                }
+                resolve(out);
+              };
+              timer = setTimeout(() => {
+                try {
+                  streamRef?.close();
+                } catch {
+                  /* noop */
+                }
+                done('');
+              }, timeoutMs);
+
+              try {
+                conn.exec(cmd, (err, s) => {
+                  if (err) return done('');
+                  streamRef = s;
+                  let out = '';
+                  s.on('data', (d: Buffer) => {
+                    out += d.toString('utf8');
+                  });
+                  s.on('close', () => done(out));
+                  s.on('error', () => done(''));
+                });
+              } catch {
+                done('');
+              }
+            }),
         };
 
         settled = true;

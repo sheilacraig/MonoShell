@@ -14,6 +14,7 @@ export async function runLocalShell(cfg: AppConfig, farewell = true): Promise<vo
     completer: makeLocalCompleter(getUsage(), () => engine.cwd),
     history: engine.history,
     getCwd: () => engine.cwd,
+    expandAlias: (line) => engine.expandAlias(line),
     // Ctrl+C：杀掉正在跑的子进程树（含内置 sleep 这类没有子进程的命令）
     interrupt: () => engine.interrupt(),
     execUser: async (line, signal) => {

@@ -260,28 +260,21 @@ npx tsx src/index.ts
     "fallbackOnNotFound": true
   },
   "safety": {
-    // 危险命令正则表达式拦截库
-    "dangerous": [
-      "\\brm\\s+(-[a-zA-Z]*f[a-zA-Z]*|-rf)\\b",
-      "\\bmkfs\\b",
-      "\\bdd\\s+if=",
-      "\\bshutdown\\b",
-      "\\breboot\\b",
-      "\\bgit\\s+push\\s+.*(-f|--force)\\b",
-      "\\bsystemctl\\s+(stop|disable|restart)\\b"
+    // 推荐：追加自定义危险命令拦截正则（在系统内置的高危规则库之上追加，不会削减原有防护）
+    "extraDangerous": [
+      // "\\bmy_custom_danger_cmd\\b"
     ],
-    // 只读白名单正则（直接放行）
-    "allowlist": [
-      "^\\s*(ls|ll|la|pwd|cd|cat|head|tail|less|more|echo|which|whoami|date|uname|hostname)\\b",
-      "^\\s*(df|du|free|uptime|top|htop|ps|netstat|ss|ip|ifconfig|ping|curl|wget)\\b",
-      "^\\s*(git\\s+(status|log|diff|branch|show|remote)\\b)"
-    ],
+    // 推荐：追加自定义只读白名单正则（在系统内置白名单之上追加）
+    "extraAllowlist": [],
+    // 【高危选项】完全接管模式：一旦配置此项，将**整体替换**系统内置的高危规则库
+    // 而非追加，原有防护会全部失效。除非确实要自建整套规则，否则请用上面的 extraDangerous。
+    // "dangerous": [ ... ],
     // 分类判定超时时间（毫秒）
     "classifyTimeoutMs": 800,
     // 防抖预取判定延时（毫秒）
     "prefetchDebounceMs": 400,
     // 用户手敲的危险命令是否也要二次确认（AI 生成的命令无论如何都会确认）。
-    // 手敲时只按上面的高危黑名单判定，不会因为 `echo x > f` 这类日常写文件而打扰。
+    // 手敲时只按高危黑名单判定，支持 alias 别名展开校验，且智能剥离引号，不会因为 `echo "a > b"` 或日常写文件而误打扰。
     "confirmManual": true
   },
   "ui": {
@@ -630,8 +623,8 @@ www-data   14285    1200  0 10:20 ?        00:00:15 /usr/bin/node /app/server.js
 | `head` | `-n <行数>` / `-nN` / `-N` / `--lines N` 四种写法都认，输出前 N 行（默认 10 行），支持管道与文件输入 |
 | `tail` | `-n <行数>` / `-nN` / `-N` / `--lines N` 四种写法都认，输出尾部 N 行（默认 10 行），支持管道与文件输入 |
 | `wc` | `-l` 行数统计，输出行数、词数、字节数 |
-| `grep` | `-i` 忽略大小写，`-n` 显示行号，`-v` 反向匹配，支持正则表达式 |
-| `find` | `-name <通配符>` 名称匹配，`-type [f\|d]` 文件/目录类型筛选，`-maxdepth <深度>` 限制检索层级 |
+| `grep` | `-i` 忽略大小写，`-n` 显示行号，`-v` 反向匹配，`-c` 计数，`-r`/`-R` 递归搜索目录（若未传 `-r` 且参数为目录则明确报错），支持正则表达式 |
+| `find` | `-name <通配符>` 名称匹配，`-type [f\|d]` 文件/目录类型筛选，`-maxdepth <深度>` / `-maxdepth=<深度>` 限制检索层级（语义严格对齐 coreutils，`-maxdepth 1` 为直接子项；深度值非法时显式报错） |
 | `du` | `-s` 汇总统计，`-h` 人类可读体积显示（K/M/G），`--max-depth=<N>` 或 `--max-depth <N>` 统计层级深度 |
 | `df` | 磁盘分区占用与剩余空间容量统计 |
 | `stat` | 打印文件/目录大小、访问权限掩码、最后修改时间等元数据 |

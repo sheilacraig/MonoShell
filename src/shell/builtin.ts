@@ -112,7 +112,7 @@ function parseLineCount(args: string[], def = 10): { n: number; files: string[] 
   return { n, files };
 }
 
-function walk(dir: string, maxDepth: number, depth = 0, acc: string[] = []): string[] {
+function walk(dir: string, maxDepth: number, depth = 1, acc: string[] = []): string[] {
   if (depth > maxDepth) return acc;
   let entries: fs.Dirent[];
   try {
@@ -123,7 +123,7 @@ function walk(dir: string, maxDepth: number, depth = 0, acc: string[] = []): str
   for (const e of entries) {
     const full = path.join(dir, e.name);
     acc.push(full);
-    if (e.isDirectory()) walk(full, maxDepth, depth + 1, acc);
+    if (e.isDirectory() && depth < maxDepth) walk(full, maxDepth, depth + 1, acc);
   }
   return acc;
 }
@@ -296,39 +296,113 @@ const commands: Record<string, Handler> = {
     const showNum = flags.some((f) => f.includes('n'));
     const invert = flags.some((f) => f.includes('v'));
     const countOnly = flags.some((f) => f.includes('c'));
+    const recursive = flags.some((f) => f.includes('r') || f.includes('R'));
     const pattern = rest.shift();
-    if (!pattern) return { out: 'usage: grep [-incv] <pattern> [file...]', code: 2 };
+    if (!pattern) return { out: 'usage: grep [-incvrR] <pattern> [file...]', code: 2 };
     let re: RegExp;
     try {
       re = new RegExp(pattern, insensitive ? 'i' : '');
     } catch {
       return { out: `grep: 无效的正则: ${pattern}`, code: 2 };
     }
-    const src = rest.length
-      ? rest
-          .map((f) => {
-            try {
-              return fs.readFileSync(resolve(f, ctx.cwd), 'utf8');
-            } catch {
-              return `grep: ${f}: 无法读取`;
-            }
-          })
-          .join('\n')
-      : ctx.stdin;
 
-    const lines = src.split('\n');
-    const matched = lines
-      .map((l, i) => ({ l, i }))
-      .filter(({ l }) => (invert ? !re.test(l) : re.test(l)));
+    if (!rest.length) {
+      // 从 stdin 读取
+      const lines = ctx.stdin.split('\n');
+      const matched = lines
+        .map((l, i) => ({ l, i }))
+        .filter(({ l }) => (invert ? !re.test(l) : re.test(l)));
 
-    if (countOnly) {
-      return { out: String(matched.length), code: matched.length > 0 ? 0 : 1 };
+      if (countOnly) {
+        return { out: String(matched.length), code: matched.length > 0 ? 0 : 1 };
+      }
+
+      const out = matched
+        .map(({ l, i }) => (showNum ? `${i + 1}:${l}` : l))
+        .join('\n');
+      return { out, code: out ? 0 : 1 };
     }
 
-    const out = matched
-      .map(({ l, i }) => (showNum ? `${i + 1}:${l}` : l))
-      .join('\n');
-    return { out, code: out ? 0 : 1 };
+    const filesToSearch: { full: string; display: string }[] = [];
+    const dirErrors: string[] = [];
+
+    for (const item of rest) {
+      const full = resolve(item, ctx.cwd);
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(full);
+      } catch {
+        dirErrors.push(`grep: ${item}: 无法读取`);
+        continue;
+      }
+      if (st.isDirectory()) {
+        if (!recursive) {
+          dirErrors.push(`grep: ${item}: 是一个目录`);
+          continue;
+        }
+        const subPaths = walk(full, 32);
+        for (const sp of subPaths) {
+          try {
+            if (fs.statSync(sp).isFile()) {
+              const rel = path.relative(ctx.cwd, sp) || sp;
+              filesToSearch.push({ full: sp, display: rel.replace(/\\/g, '/') });
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      } else {
+        filesToSearch.push({ full, display: item });
+      }
+    }
+
+    if (dirErrors.length > 0 && filesToSearch.length === 0) {
+      return { out: dirErrors.join('\n'), code: 2 };
+    }
+
+    const showFilename = filesToSearch.length > 1 || recursive;
+    let totalMatches = 0;
+    const outLines: string[] = [];
+
+    if (dirErrors.length > 0) {
+      outLines.push(...dirErrors);
+    }
+
+    for (const f of filesToSearch) {
+      let content = '';
+      try {
+        content = fs.readFileSync(f.full, 'utf8');
+      } catch {
+        outLines.push(`grep: ${f.display}: 无法读取`);
+        continue;
+      }
+      const lines = content.split(/\r?\n/);
+      if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+
+      const matched = lines
+        .map((l, i) => ({ l, i }))
+        .filter(({ l }) => (invert ? !re.test(l) : re.test(l)));
+
+      totalMatches += matched.length;
+
+      if (countOnly) {
+        if (showFilename) {
+          outLines.push(`${f.display}:${matched.length}`);
+        } else {
+          outLines.push(String(matched.length));
+        }
+      } else {
+        for (const { l, i } of matched) {
+          let lineStr = l;
+          if (showNum) lineStr = `${i + 1}:${lineStr}`;
+          if (showFilename) lineStr = `${f.display}:${lineStr}`;
+          outLines.push(lineStr);
+        }
+      }
+    }
+
+    const out = outLines.join('\n');
+    return { out, code: totalMatches > 0 ? 0 : dirErrors.length > 0 ? 2 : 1 };
   },
 
   find: (args, ctx) => {
@@ -340,8 +414,19 @@ const commands: Record<string, Handler> = {
       const a = args[i];
       if (a === '-name') namePat = args[++i];
       else if (a === '-type') typeFilter = args[++i] as 'f' | 'd';
-      else if (a === '-maxdepth') maxDepth = Number(args[++i]) || 1;
-      else if (!a.startsWith('-')) start = a;
+      // `-maxdepth N` 与 `-maxdepth=N` 两种写法都认。只认前者的话，等号形式会
+      // 掉进下面 `!a.startsWith('-')` 之外被静默丢弃 —— 命令正常返回、只是层级
+      // 限制没生效，属于最难察觉的一类问题。
+      else if (a === '-maxdepth' || a.startsWith('-maxdepth=')) {
+        const raw = a.startsWith('-maxdepth=') ? a.slice('-maxdepth='.length) : args[++i];
+        const n = Number(raw);
+        // 不再用 `|| 1` 兜底：那会把 `-maxdepth abc` 悄悄变成「只看一层」，
+        // 用户以为限制了深度，实际结果完全不同。非法值直接报错更诚实。
+        if (!Number.isFinite(n) || n < 0) {
+          return { out: `find: 无效的 -maxdepth 值 '${raw ?? ''}'`, code: 2 };
+        }
+        maxDepth = n;
+      } else if (!a.startsWith('-')) start = a;
     }
     const root = resolve(start, ctx.cwd);
     let re: RegExp | null = null;

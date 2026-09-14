@@ -240,6 +240,16 @@ export class ShellEngine {
     return `\x1b[36m${shown}\x1b[0m \x1b[35m$\x1b[0m `;
   }
 
+  /** alias 展开（只展开命令行的首个词） */
+  expandAlias(line: string): string {
+    const trimmed = line.trim();
+    const first = trimmed.split(/\s+/)[0];
+    if (first && this.aliases.has(first)) {
+      return this.aliases.get(first)! + trimmed.slice(first.length);
+    }
+    return trimmed;
+  }
+
   /**
    * 用户按下 Ctrl+C。
    *
@@ -354,14 +364,8 @@ export class ShellEngine {
   }
 
   async execSingle(line: string, timeoutMs?: number, opts?: ExecOpts): Promise<ExecOutcome> {
-    const trimmed = line.trim();
-
     // alias 展开（只展开首个词）
-    let expanded = trimmed;
-    const first = trimmed.split(/\s+/)[0];
-    if (first && this.aliases.has(first)) {
-      expanded = this.aliases.get(first) + trimmed.slice(first.length);
-    }
+    const expanded = this.expandAlias(line);
 
     const parsed = parseLine(expanded);
     const segments = parsed.segments;

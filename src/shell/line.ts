@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export type Completer = (line: string, cursor: number) => string[];
+export type Completer = (line: string, cursor: number) => string[] | Promise<string[]>;
 
 /**
  * 自带的行编辑器：回显、历史、光标、补全全部自己实现。
@@ -99,7 +99,9 @@ export class LineEditor {
       this.finishCurrent = finish;
       const onEnd = () => finish(null);
 
+      let running = false;
       const process = () => {
+        if (running) return;
         while (this.escBuf.length) {
           if (this.escBuf[0] === '\x1b') {
             const seq = matchSeq(this.escBuf);
@@ -116,7 +118,16 @@ export class LineEditor {
           }
           const ch = this.escBuf[0];
           this.escBuf = this.escBuf.slice(1);
-          if (this.handleChar(ch, finish)) return;
+          const r = this.handleChar(ch, finish);
+          if (r instanceof Promise) {
+            running = true;
+            r.then((done) => {
+              running = false;
+              if (!done) process();
+            });
+            return;
+          }
+          if (r) return;
         }
       };
 
@@ -168,7 +179,7 @@ export class LineEditor {
   }
 
   /** 返回 true 表示本次读取结束 */
-  private handleChar(ch: string, finish: (l: string | null) => void): boolean {
+  private handleChar(ch: string, finish: (l: string | null) => void): boolean | Promise<boolean> {
     switch (ch) {
       case '\r':
       case '\n': {
@@ -232,9 +243,13 @@ export class LineEditor {
         process.stdout.write('\x1b[2J\x1b[H');
         this.render();
         return false;
-      case '\t':
-        this.complete();
+      case '\t': {
+        const p = this.complete();
+        if (p instanceof Promise) {
+          return p.then(() => false);
+        }
         return false;
+      }
       default:
         if (ch >= ' ' || ch === '\t') {
           this.buf = this.buf.slice(0, this.cursor) + ch + this.buf.slice(this.cursor);
@@ -304,9 +319,10 @@ export class LineEditor {
     this.render();
   }
 
-  private complete(): void {
+  private complete(): void | Promise<void> {
     const cwd = this.getCwd ? this.getCwd() : process.cwd();
     const isDir = (candidate: string): boolean => {
+      if (candidate.endsWith('/') || candidate.endsWith('\\')) return true;
       try {
         const full = path.resolve(cwd, candidate.replace(/^~/, os.homedir()));
         return fs.existsSync(full) && fs.statSync(full).isDirectory();
@@ -315,13 +331,21 @@ export class LineEditor {
       }
     };
 
-    const out = resolveCompletion(this.buf, this.cursor, this.completer(this.buf, this.cursor), isDir);
-    if (!out) return;
+    const apply = (candidates: string[]) => {
+      const out = resolveCompletion(this.buf, this.cursor, candidates, isDir);
+      if (!out) return;
 
-    this.buf = out.buf;
-    this.cursor = out.cursor;
-    if (out.list) process.stdout.write('\r\n' + out.list.join('  ') + '\r\n');
-    this.render();
+      this.buf = out.buf;
+      this.cursor = out.cursor;
+      if (out.list) process.stdout.write('\r\n' + out.list.join('  ') + '\r\n');
+      this.render();
+    };
+
+    const raw = this.completer(this.buf, this.cursor);
+    if (raw instanceof Promise) {
+      return raw.then(apply);
+    }
+    apply(raw);
   }
 }
 
