@@ -109,6 +109,9 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
   let closed = false;
   env.registerClose?.(() => {
     closed = true;
+    // 断连时一并退出直通：编辑器状态归位，避免残留的 passthroughSink
+    // 指向已断开的会话（下一次 read 会走直通分支，按键发给一个死连接）。
+    editor.setPassthrough(false);
     editor.interrupt();
   });
   // 把「远端输出怎么落屏」交给行编辑器：它才知道要不要先清掉提示符那一行。
@@ -118,15 +121,25 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
   // 会在编辑器里被当成未知控制字符丢掉，压根发不到远端。
   env.registerRemoteWriter?.((s) => {
     const { changed, active } = sniffer.feed(s);
-    if (changed) {
-      editor.setPassthrough(active, (data) => env.writeRaw?.(data));
-      // 只在「退出」时提示：进入时远端全屏程序马上要接管绘制，这时候插一行
-      // 本地提示会被它的画面覆盖，反而闪烁。退出后提示才是用户能看到、也需要知道的。
-      if (!active) {
-        ui.note('已退出全屏程序，恢复行编辑（补全 / 历史 / AI 触发）。');
-      }
+    // 切换时机的约定：**边界 chunk 一律按原样透传落屏**。
+    //
+    // - 进入（active=true）：先切直通再写。首帧全屏重绘原样落屏，不被插
+    //   清行前缀（\r\x1b[2K）和行尾 \r\n 污染。
+    // - 退出（active=false）：**先写再切**。退出 chunk 里带着 \x1b[?1049l
+    //   （切回主屏序列），若先退出直通，这个 chunk 会走非直通路径，而那条
+    //   路径会把「纯控制序列块」整块丢弃（见 externalOutputBytes）——TCP 把
+    //   detach 输出分包时，1049l 恰好单独成块，被吞掉后本地终端就永远卡在
+    //   备用屏上（tmux 残影不消失）。先写后切，1049l 原样落屏，主屏才回得来。
+    if (changed && active) {
+      editor.setPassthrough(true, (data) => env.writeRaw?.(data));
     }
     editor.writeExternal(s);
+    if (changed && !active) {
+      editor.setPassthrough(false);
+      // 提示必须在 writeExternal 之后：1049l 落屏前写的内容都留在备用屏上，
+      // 终端切回主屏时会被整个丢弃，用户永远看不到这条 note。
+      ui.note('已退出全屏程序，恢复行编辑（补全 / 历史 / AI 触发）。');
+    }
   });
 
   const takeOver = async (goal: string, why?: string) => {

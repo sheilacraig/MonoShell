@@ -195,7 +195,12 @@ export class LineEditor {
           // 逃生键：Ctrl+]（\x1d）。全屏程序极少用它，且**不转发给远端** ——
           // 否则退出直通时会在远端留下一串垃圾输入。
           // 用单键而不是字符串命令，是为了不被远端程序的状态机吃掉。
-          if (s.includes(ESCAPE_KEY)) {
+          const escIdx = s.indexOf(ESCAPE_KEY);
+          if (escIdx >= 0) {
+            // stdin 的 data 事件可能合并多次按键（快速输入 / paste）：
+            // 'hhh\x1drest' 这样的 chunk 不能整块丢——\x1d 之前的字节属于
+            // 全屏程序，必须先发出去，否则静默丢失。
+            if (escIdx > 0) this.passthroughSink?.(s.slice(0, escIdx));
             this.setPassthrough(false);
             this.onPassthroughEscape?.();
             return;
