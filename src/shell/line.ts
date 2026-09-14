@@ -5,6 +5,17 @@ import path from 'node:path';
 export type Completer = (line: string, cursor: number) => string[] | Promise<string[]>;
 
 /**
+ * 直通模式的逃生键：Ctrl+]（ASCII 0x1D）。
+ *
+ * 为什么用单键而不是 `/cooked` 之类的字符串命令：直通期间所有输入都原样发给
+ * 远端，字符串命令会先被远端程序收到、污染它的输入，等切回来时远端已经乱了。
+ * 单键且不转发，退出时远端状态保持干净。
+ *
+ * 选 Ctrl+] 是因为全屏程序极少占用它（telnet 用它但场景不重叠）。
+ */
+const ESCAPE_KEY = '\x1d';
+
+/**
  * 自带的行编辑器：回显、历史、光标、补全全部自己实现。
  * 不再依赖宿主 shell 的 readline，因此不受 PowerShell / bash 各自怪癖影响。
  */
@@ -48,6 +59,50 @@ export class LineEditor {
    * 不该把程序关掉。所以这里只是「通知」，read() 继续等输入。
    */
   onCtrlC?: () => void;
+
+  /**
+   * 直通模式：把本地按键**原样**交给会话层透传，不做任何行编辑。
+   *
+   * 用途：tmux / vim / less / top 这类全屏程序要求字节级输入。行编辑器会消费
+   * 控制字符（`\x02` 之类没有 case 的一律丢弃），导致它们的快捷键发不出去。
+   * 识别到全屏程序接管屏幕时临时让位，退出后自动收回。
+   *
+   * 直通期间 read() 不会结束 —— 用户按键属于那个全屏程序，不该被当成"敲完一行"。
+   */
+  private passthrough = false;
+  /** 直通时把原始输入段交给谁（会话层负责写远端） */
+  private passthroughSink: ((data: string) => void) | null = null;
+
+  /**
+   * 用户按逃生键（Ctrl+]）退出直通时回调。
+   * 上层用它提示用户「已回到普通模式」，避免用户以为还卡在全屏程序里。
+   */
+  onPassthroughEscape?: () => void;
+
+  /**
+   * 开启/关闭直通。
+   *
+   * sink 只在开启时传入一次即可；重复开启是幂等的。
+   * 关闭时会把编辑器内部状态复位 —— 直通期间攒的转义缓冲属于那个全屏程序，
+   * 不能留下来污染回到普通模式后的第一次按键（否则会冒出一个幽灵字符）。
+   */
+  setPassthrough(on: boolean, sink?: (data: string) => void): void {
+    if (on && sink) this.passthroughSink = sink;
+    if (this.passthrough === on) return;
+    this.passthrough = on;
+    if (!on) {
+      // 直通期间的输入全部已经交给远端了，本地不留任何残留
+      this.escBuf = '';
+      this.buf = '';
+      this.cursor = 0;
+      // 全屏程序退出后屏幕内容由远端恢复，这里重画一次提示符，让界面回到可控状态
+      if (this.finishCurrent) this.render();
+    }
+  }
+
+  get isPassthrough(): boolean {
+    return this.passthrough;
+  }
 
   constructor(
     private promptFn: () => string,
@@ -132,7 +187,23 @@ export class LineEditor {
       };
 
       const onData = (d: Buffer | string) => {
-        this.escBuf += typeof d === 'string' ? d : d.toString('utf8');
+        const s = typeof d === 'string' ? d : d.toString('utf8');
+        // 直通：字节原样交给会话层，不经过任何编辑逻辑。
+        // 这里是 tmux/vim 快捷键能发出去的关键 —— 一旦进 handleChar，
+        // \x02 这类控制字符就会在 default 分支被丢掉。
+        if (this.passthrough) {
+          // 逃生键：Ctrl+]（\x1d）。全屏程序极少用它，且**不转发给远端** ——
+          // 否则退出直通时会在远端留下一串垃圾输入。
+          // 用单键而不是字符串命令，是为了不被远端程序的状态机吃掉。
+          if (s.includes(ESCAPE_KEY)) {
+            this.setPassthrough(false);
+            this.onPassthroughEscape?.();
+            return;
+          }
+          this.passthroughSink?.(s);
+          return;
+        }
+        this.escBuf += s;
         process();
       };
 
@@ -156,6 +227,12 @@ export class LineEditor {
    * 不在 read 中时（AI 在跑命令、命令正在收尾）没有输入行要保护，原样写即可。
    */
   writeExternal(s: string): void {
+    // 直通期间远端是全屏程序在画屏幕，**绝不能**插手清行/重画提示符 ——
+    // 那会把 tmux/vim 的界面撕碎。原样写下去即可。
+    if (this.passthrough) {
+      process.stdout.write(s);
+      return;
+    }
     // 非交互（管道）不做行重绘，转义序列只会污染输出
     if (!process.stdout.isTTY || !this.finishCurrent) {
       process.stdout.write(s);

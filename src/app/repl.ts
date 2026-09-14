@@ -5,6 +5,7 @@ import { checkRisk } from '../core/safety.js';
 import type { ExecResult } from '../term/capture.js';
 import { watchInterrupt } from '../term/interrupt.js';
 import { InputHub, TerminalUI } from '../term/ui.js';
+import { PassthroughSniffer } from '../term/passthrough.js';
 import { LineEditor, type Completer } from '../shell/line.js';
 import { getUsage } from '../shell/usage.js';
 
@@ -47,6 +48,12 @@ export type ReplEnv = {
    * 交给行编辑器先清行、吐输出、再重画提示符，才不会被顶掉。
    */
   registerRemoteWriter?: (write: (s: string) => void) => void;
+  /**
+   * 直通模式下把**原始按键字节**写给会话（不经任何编辑/分类逻辑）。
+   * SSH 会话提供它：远端 PTY 直接收字节，tmux/vim 才能正常响应快捷键。
+   * 不提供时直通模式不可用（本地内置 shell 属于非交互，确实不需要）。
+   */
+  writeRaw?: (data: string) => void;
   /** 退出时是否打印告别语（连接选择循环里由上层统一提示） */
   farewell?: boolean;
 };
@@ -60,9 +67,15 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
   // 空提示符下按 Ctrl+C：清掉半行输入的同时把中断转给会话 —— 远端可能还有前台
   // 任务在跑（tail -f / top），本地也可能有命令刚发出去还没回来。
   editor.onCtrlC = () => env.interrupt?.();
+  // 用户在全屏程序里按 Ctrl+] 强制退出直通（自动识别失灵时的逃生口）
+  editor.onPassthroughEscape = () => {
+    ui.note('已退出直通模式，恢复行编辑（补全 / 历史 / AI 触发）。');
+  };
   const classifier = new Classifier(cfg, env.label);
   // 命名避开 index.ts 的 usage() 帮助函数，免得读起来打架
   const stats = getUsage();
+  // 嗅探全屏程序进出（备用屏幕切换），决定行编辑器何时让位给字节直通
+  const sniffer = new PassthroughSniffer();
 
   const agent = new Agent(cfg, {
     // Agent 只需要环境描述（SessionContext），不需要 IO 能力，
@@ -98,8 +111,23 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
     closed = true;
     editor.interrupt();
   });
-  // 把「远端输出怎么落屏」交给行编辑器：它才知道要不要先清掉提示符那一行
-  env.registerRemoteWriter?.((s) => editor.writeExternal(s));
+  // 把「远端输出怎么落屏」交给行编辑器：它才知道要不要先清掉提示符那一行。
+  //
+  // 顺带在这里嗅探全屏程序（tmux / vim / less / top …）的进出：这类程序要求
+  // 字节级透传，行编辑器必须临时让位，否则它们的快捷键（如 tmux 的 Ctrl+b）
+  // 会在编辑器里被当成未知控制字符丢掉，压根发不到远端。
+  env.registerRemoteWriter?.((s) => {
+    const { changed, active } = sniffer.feed(s);
+    if (changed) {
+      editor.setPassthrough(active, (data) => env.writeRaw?.(data));
+      // 只在「退出」时提示：进入时远端全屏程序马上要接管绘制，这时候插一行
+      // 本地提示会被它的画面覆盖，反而闪烁。退出后提示才是用户能看到、也需要知道的。
+      if (!active) {
+        ui.note('已退出全屏程序，恢复行编辑（补全 / 历史 / AI 触发）。');
+      }
+    }
+    editor.writeExternal(s);
+  });
 
   const takeOver = async (goal: string, why?: string) => {
     aborted = false;
@@ -133,6 +161,28 @@ export async function repl(cfg: AppConfig, env: ReplEnv): Promise<void> {
 
       const t = line.trim();
       if (!t) continue;
+
+      /**
+       * 直通模式的手动开关。
+       *
+       * 自动识别靠备用屏幕切换序列（见 term/passthrough.ts），覆盖绝大多数场景，
+       * 但有两类情况必须留手动出口：
+       * 1. 远端 TERM 的 smcup 没定义 1049（如 TERM=vt100/linux）—— less/top 不切屏，
+       *    自动识别触发不了；
+       * 2. 偶尔误判——识别到了但不是全屏程序，或反过来。
+       *
+       * 退出走 Ctrl+]（见 LineEditor 的 ESCAPE_KEY）：直通期间所有按键都发给远端，
+       * 用字符串命令退出会先污染远端输入。
+       */
+      if (t === '/raw' || t === '/passthrough') {
+        if (!env.writeRaw) {
+          ui.warn('当前会话不支持直通模式（仅 SSH 会话支持）。');
+          continue;
+        }
+        editor.setPassthrough(true, (data) => env.writeRaw?.(data));
+        ui.note('已进入直通模式：按键原样转给远端，AI 不介入。按 Ctrl+] 返回。');
+        continue;
+      }
 
       if (env.history[env.history.length - 1] !== t) env.history.push(t);
 

@@ -289,6 +289,20 @@ export async function runSshShell(cfg: AppConfig, name: string, standalone = tru
     registerRemoteWriter: (write) => {
       writeRemote = write;
     },
+    /**
+     * 直通模式：把本地原始按键直接写进远端 PTY。
+     *
+     * 走 session.write 而不是 execUser，是因为这里要的就是**字节级透传** ——
+     * 不加换行、不做分类、不过行编辑器。tmux 的 `Ctrl+b d` 靠这条路才发得出去。
+     * 远端已是 xterm-256color 的真实 PTY，收到什么就按什么解释。
+     */
+    writeRaw: (data) => {
+      try {
+        session.write(data);
+      } catch {
+        /* 连接可能刚好断了 */
+      }
+    },
     promptLine: prompt,
     completer: makeRemoteCompleter(getUsage(), async (word, onlyDirs) => {
       if (!session.execQuery) return [];

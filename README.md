@@ -687,6 +687,7 @@ MonoShell/
 │   └── term/
 │       ├── capture.ts    # 命令输出捕获包装器与流式 Scrubber 擦除器
 │       ├── prompt.ts     # 通用终端提问（明文 / 密码不回显）
+│       ├── passthrough.ts# 全屏程序直通嗅探器（备用屏序列识别 / 跨 chunk 拼齐）
 │       └── ui.ts         # 终端行内确认、警示与注释行 UI 渲染
 ├── test/
 │   ├── shell.ts          # 内置 Shell 核心命令与语法冒烟测试集
@@ -696,7 +697,10 @@ MonoShell/
 │   ├── capture.ts        # 捕获通道标记擦除回归（回显折行 / 残渣 / 分包）
 │   ├── usage.ts          # 使用统计 / 补全决策 / 行编辑器真实按键路径
 │   ├── handshake.ts      # 远端握手标记判定与远端输出插屏
-│   └── smoke.ts          # 本地会话透传与输出截获端到端测试集
+│   ├── passthrough.ts    # 直通嗅探器（备用屏序列 / 分片 / 零误触发）
+│   ├── e2e-passthrough.ts# 直通端到端（tmux detach / vim 按键 / 逃生键 / 写屏）
+│   ├── smoke.ts          # 本地会话透传与输出截获端到端测试集
+│   └── interrupt.ts      # 中断信号处理与退出清理
 ├── package.json
 └── tsconfig.json
 ```
@@ -705,13 +709,75 @@ MonoShell/
 
 ## 已知限制与设计权衡
 
-1. **全屏交互式程序支持**：
-   - 在**本地内置 Shell** 模式下，目前不支持 `vim`、`nano`、`htop` 等需要复杂 curses / 全屏重绘的交互式程序；
-   - 在 **SSH 远程模式** 下，底层为原生 Linux 终端流，可正常使用全部全屏程序。
-2. **作业控制 (Job Control)**：
+1. **全屏交互式程序支持（SSH 模式已支持）**：
+   - 在 **SSH 远程模式** 下，`tmux` / `vim` / `less` / `top` 等全屏程序可正常使用。
+     原理见下方「全屏程序直通模式」：远端切换备用屏幕时，本地行编辑器自动让位，
+     按键字节级透传给远端，远端退出全屏后自动恢复行编辑。
+   - 在**本地内置 Shell** 模式下，仍不支持 `vim`、`nano`、`htop` 等需要复杂
+     curses / 全屏重绘的交互式程序（内置 Shell 不驱动 PTY，只能逐行执行）。
+2. **本地会话不支持直通模式**：
+   - 直通依赖"远端输出里出现备用屏幕切换序列"这一信号，本地内置 Shell 不产生该信号。
+     在本地会话里敲 `/raw` 会明确提示不支持，而不是静默失灵。
+3. **作业控制 (Job Control)**：
    - 内置 Shell 暂不支持复杂的作业控制操作（如 `Ctrl+Z` 挂起后台、`fg`/`bg` 唤醒）。
-3. **变量展开限制**：
+4. **变量展开限制**：
    - 暂不支持复杂的 Shell Script 语法（如 `for i in ...; do` 语法块或 `${VAR:-default}` 复杂参数展开），建议复杂脚本直接写入 `.sh` 文件后执行。
+
+---
+
+## 全屏程序直通模式（tmux / vim / less / top）
+
+### 为什么需要它
+
+MonoShell 的输入侧挂着自己的行编辑器（补全、历史、AI 触发都长在上面）。这个编辑器
+只认"可打印字符"，控制字符在兜底分支里被直接丢弃——所以你在 `tmux` 里按
+`Ctrl+b d` 想 detach，`\x02` 半路就没了，`d` 孤零零发过去，什么都不发生。
+
+修法不是去逐个补控制键（`Ctrl+b`、`Ctrl+c`、`Ctrl+z`、`Ctrl+r`…永远补不完），
+而是**识别出"这会儿不该由我行编辑"**，把输入权整个交还给远端程序。
+
+### 判据
+
+用**备用屏幕（alternate screen）切换序列**作为信号：
+
+| 序列 | 含义 |
+| --- | --- |
+| `\x1b[?1049h` / `\x1b[?47h` | 进入备用屏幕（全屏程序启动） |
+| `\x1b[?1049l` / `\x1b[?47l` | 退出备用屏幕（全屏程序结束） |
+
+`tmux` / `vim` / `less` / `top` / `htop` / `nano` 依赖光标定位与全屏重绘，
+**都会**发这对序列，是比"命令名白名单"可靠得多的判据——它不关心跑的是什么程序，
+只关心屏幕是不是被接管了。
+
+实现上有一处必须小心：ANSI 序列可能被 TCP 分片截断（`\x1b[?10` + `49h`）。
+嗅探器保留尾部缓冲，跨 chunk 拼齐后再判定。
+
+### 使用方式
+
+大多数情况**你什么都不用做**：
+
+```
+$ ssh prod-01
+prod-01$ tmux new -s work     # tmux 起，自动进直通，Ctrl+b 系列全部可用
+prod-01$ ...                  # Ctrl+b d  detach——自动退回 MonoShell 普通模式
+```
+
+需要在**非全屏程序**里手动进直通（比如交互式 `read -p` 提示）时：
+
+```
+/raw            # 或 /passthrough
+```
+
+退出直通统一按 **`Ctrl+]`**（`\x1d`）。
+这个键在 tmux / vim / less / top 里几乎不用，且**本身不会转发给远端**，
+不会在远端留下垃圾输入。
+
+### 边界
+
+- `less` 是否进备用屏，取决于远端 `TERM` 下的 `smcup` 定义。
+  `xterm-256color` 会进，`vt100` / `linux` 通常不进——此时用 `/raw` 手动兜底。
+- 直通期间 MonoShell 的补全、历史和 AI 触发全部暂停，这是有意为之：
+  字节原样转发是唯一能保证全屏程序正确响应的做法。
 
 ---
 
@@ -721,18 +787,20 @@ MonoShell/
 # 编译 TypeScript 产物
 npm run build
 
-# 全量测试（8 套，依次串行）
+# 全量测试（11 套，依次串行）
 npm test
 
 # 按模块单跑
-npm run test:shell       # 内置 Shell 核心命令与语法
-npm run test:agent       # AI 策略 / 重试 / 危险命令分级 / 密码命令终端接管
-npm run test:setup       # 配置引导（dryRun，不碰真实配置文件）
-npm run test:launcher    # 连接选择器（脚本化假输入，无需真终端）
-npm run test:capture     # 捕获通道标记擦除（回显折行 / 残渣 / 分包）
-npm run test:usage       # 使用统计 / 补全决策 / 行编辑器按键路径
-npm run test:handshake   # 远端握手标记判定与远端输出插屏
-npm run test:smoke       # 本地会话透传与输出截获端到端（会真实拉起本地 shell）
+npm run test:shell             # 内置 Shell 核心命令与语法
+npm run test:agent             # AI 策略 / 重试 / 危险命令分级 / 密码命令终端接管
+npm run test:setup             # 配置引导（dryRun，不碰真实配置文件）
+npm run test:launcher          # 连接选择器（脚本化假输入，无需真终端）
+npm run test:capture           # 捕获通道标记擦除（回显折行 / 残渣 / 分包）
+npm run test:usage             # 使用统计 / 补全决策 / 行编辑器按键路径
+npm run test:handshake         # 远端握手标记判定与远端输出插屏
+npm run test:passthrough       # 直通嗅探器（备用屏序列识别 / 分片 / 零误触发）
+npm run test:e2e-passthrough   # 直通端到端（tmux detach / vim 按键 / 逃生键）
+npm run test:smoke             # 本地会话透传与输出截获端到端（会真实拉起本地 shell）
 ```
 
 ---
